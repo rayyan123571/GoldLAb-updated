@@ -9,7 +9,7 @@
 const path = require('path')
 const fs = require('fs')
 const initSqlJs = require('sql.js')
-const { SHOP_FIELDS, SHOP_DEFAULTS } = require('./shopDefaults.cjs')
+const { SHOP_FIELDS, SHOP_DEFAULTS, SLIP_TERMS_DEFAULT, SLIP_TEXT_FIELDS, SLIP_TEXT_DEFAULTS } = require('./shopDefaults.cjs')
 
 let SQL = null
 let db = null
@@ -67,7 +67,8 @@ CREATE TABLE IF NOT EXISTS settings (
   shop_phone2 TEXT,
   shop_phone3 TEXT,
   shop_address TEXT,
-  shop_seeded INTEGER    -- 1 once the header defaults have been filled in (see migrateSchema)
+  shop_seeded INTEGER,   -- 1 once the header defaults have been filled in (see migrateSchema)
+  slip_terms TEXT        -- لیب رسید terms/fee paragraph; blank hides the box (see migrateSchema)
 );
 
 CREATE TABLE IF NOT EXISTS customers (
@@ -227,6 +228,17 @@ function migrateSchema() {
     db.run('UPDATE settings SET shop_seeded = 1')
   }
 
+  // settings.slip_terms — the لیب رسید terms paragraph. It gets its OWN guard,
+  // NOT shop_seeded: DBs from the shop-header release already have
+  // shop_seeded = 1, so folding this into that block would add the column and
+  // never backfill it — the terms box would silently vanish from their slips.
+  // The column being absent IS the one-time guard; once it exists (even
+  // deliberately cleared to ''), this never runs again.
+  if (!sCols.includes('slip_terms')) {
+    db.run('ALTER TABLE settings ADD COLUMN slip_terms TEXT')
+    db.run('UPDATE settings SET slip_terms = ? WHERE slip_terms IS NULL OR slip_terms = ?', [SLIP_TERMS_DEFAULT, ''])
+  }
+
   // expenses.ts — full timestamp. Patch DBs that had expenses before it existed.
   const xCols = query('PRAGMA table_info(expenses)').map((r) => r.name)
   if (xCols.length && !xCols.includes('ts')) db.run('ALTER TABLE expenses ADD COLUMN ts TEXT')
@@ -264,9 +276,9 @@ function seedSettings() {
     // so a brand-new install prints a complete header before anyone opens Defaults.
     db.run(
       `INSERT INTO settings (id, date, rate_tezabi_tola, parchi_charges, fc_per_gram, rate_tezabi_gram, point, slip_count, raw_print_mode, print_scale,
-                             ${SHOP_FIELDS.join(', ')}, shop_seeded)
-       VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${SHOP_FIELDS.map(() => '?').join(', ')}, 1)`,
-      [today, 9000, 100, 80, 772, 100, 1, 'auto', 1.15, ...SHOP_FIELDS.map((f) => SHOP_DEFAULTS[f])]
+                             ${SLIP_TEXT_FIELDS.join(', ')}, shop_seeded)
+       VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${SLIP_TEXT_FIELDS.map(() => '?').join(', ')}, 1)`,
+      [today, 9000, 100, 80, 772, 100, 1, 'auto', 1.15, ...SLIP_TEXT_FIELDS.map((f) => SLIP_TEXT_DEFAULTS[f])]
     )
   }
 }
@@ -350,7 +362,7 @@ const api = {
     run(
       `UPDATE settings SET date=?, rate_tezabi_tola=?, parchi_charges=?, fc_per_gram=?, rate_tezabi_gram=?, point=?, slip_count=?,
               raw_print_mode=COALESCE(?, raw_print_mode), print_scale=COALESCE(?, print_scale),
-              ${SHOP_FIELDS.map((f) => `${f}=COALESCE(?, ${f})`).join(', ')} WHERE id=1`,
+              ${SLIP_TEXT_FIELDS.map((f) => `${f}=COALESCE(?, ${f})`).join(', ')} WHERE id=1`,
       [
         rates.date,
         rates.rate_tezabi_tola,
@@ -361,7 +373,7 @@ const api = {
         rates.slip_count != null ? rates.slip_count : 1,
         rates.raw_print_mode != null ? rates.raw_print_mode : null,
         rates.print_scale != null ? Number(rates.print_scale) : null,
-        ...SHOP_FIELDS.map((f) => (rates[f] != null ? String(rates[f]) : null))
+        ...SLIP_TEXT_FIELDS.map((f) => (rates[f] != null ? String(rates[f]) : null))
       ]
     )
     return api.getRates()

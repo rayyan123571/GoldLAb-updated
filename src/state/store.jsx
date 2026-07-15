@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { computeTable } from '../logic/purity.js'
 import { GRAMS_PER_TOLA, GRAMS_PER_RATTI, round } from '../logic/units.js'
-import { buildSlipHeader, shopOf, SLIP_DESIGN_W } from '../logic/slipHeader.js'
+import { buildSlipHeader, buildSlipTerms, shopOf, SLIP_DESIGN_W } from '../logic/slipHeader.js'
 
 // Pure-gold (khalis) + qeemat from a {wazan, point, rate} gold entry — the SAME
 // ratti-scale formula the نقد/ادھار panel's GoldRow uses, so a saved transaction
@@ -120,21 +120,25 @@ function showToast(text, ok) {
 
 // Footer: the sona-testing fee paragraph is LAB-ONLY; the software line (with
 // Rayyan 0307-6965231) prints on every slip.
-function buildSlipFooter(kind) {
+function buildSlipFooter(kind, rates) {
   const el = document.createElement('div')
   el.dir = 'rtl'
   el.className = 'urdu'
   el.style.cssText = 'color:#000;margin-top:5px'
-  const fee = kind === 'lab'
-    ? '<div style="font-size:12.5px;font-weight:500;line-height:2;text-align:right;border:1.5px solid #000;padding:3px 6px;margin-bottom:5px">' +
-      'سونا ٹیسٹ کرنے کی فیس 100 روپے اور خالص سونا یا رقم لینے کی صورت میں 40 روپے فی گرام مزدوری ہو گی۔ رزلٹ کے بعد سونا لینے یا رقم لینے کا اندر کا کارندہ پابند نہیں ہو گا۔ سونا صرف رتی کی صورت میں چیک کیا جاتا ہے۔ یہاں خالص سونے کا لین دین کیا جاتا ہے۔' +
-      '</div>'
-    : ''
-  el.innerHTML = fee +
+  // Lab-only terms/fee box — now DATA-DRIVEN (settings.slip_terms), built by the
+  // SAME buildSlipTerms() the ڈیفالٹ سیٹنگز preview uses, so the two never drift.
+  // Blank terms → null → no box at all.
+  if (kind === 'lab') {
+    const terms = buildSlipTerms(rates && rates.slip_terms)
+    if (terms) el.appendChild(terms)
+  }
+  // Software-vendor footer (services line + Rayyan) — NOT the shop's identity, so
+  // it stays hardcoded, byte-for-byte unchanged.
+  el.insertAdjacentHTML('beforeend',
     '<div style="font-size:12.5px;font-weight:500;line-height:1.9;text-align:center;border-top:2px solid #000;padding-top:4px">' +
     'لیبارٹری، کاسٹنگ سنٹر، ہول سیل شاپ، جیولری شاپ، چوڑی کڑے اور کارخانے کے سوفٹ ویئر دستیاب ہیں۔' +
     '<div dir="ltr" style="font-size:14px;font-weight:800;margin-top:2px">Rayyan&nbsp;&nbsp;0307-6965231</div>' +
-    '</div>'
+    '</div>')
   return el
 }
 
@@ -189,7 +193,7 @@ function buildRasterSlipHtml(panelEl, rates) {
     const DOTS = 576, PAD = 10, DESIGN_W = SLIP_DESIGN_W
     const scale = (DOTS - 2 * PAD) / DESIGN_W
     const header = buildSlipHeader(rates).outerHTML
-    const footer = buildSlipFooter(panelEl.getAttribute('data-receipt') || '').outerHTML
+    const footer = buildSlipFooter(panelEl.getAttribute('data-receipt') || '', rates).outerHTML
     return '<!doctype html><html dir="ltr"><head><meta charset="utf-8"><style>' + css +
       '\nhtml,body{margin:0!important;padding:0!important;background:#fff!important}' +
       // ── Print typography (203dpi thermal): BIGGER regular/medium text, not
@@ -532,7 +536,7 @@ export function AppProvider({ children }) {
         // The shop header rides along with the slip data: rasterPrint.cjs renders
         // the header from `shop`, so the printed header always shows the CURRENT
         // ڈیفالٹ سیٹنگز values — the same ones the settings preview draws.
-        payload = { data: { ...slipData, shop: shopOf(rates) }, copies: n }
+        payload = { data: { ...slipData, shop: shopOf(rates), terms: String(rates.slip_terms ?? '') }, copies: n }
       } else {
         const rasterHtml = buildRasterSlipHtml(panelEl, rates)
         if (rasterHtml) payload = { html: rasterHtml, copies: n }
@@ -617,7 +621,7 @@ export function AppProvider({ children }) {
       // receipt this is (lab / naqad / udhar / wasooli).
       inner.appendChild(buildSlipHeader(rates))
       inner.appendChild(clone)
-      inner.appendChild(buildSlipFooter(panelEl.getAttribute('data-receipt') || ''))
+      inner.appendChild(buildSlipFooter(panelEl.getAttribute('data-receipt') || '', rates))
       area.appendChild(inner)
       root.appendChild(area)
       overlay.appendChild(root)
@@ -716,7 +720,7 @@ export function AppProvider({ children }) {
       clone.querySelectorAll('.no-print').forEach((n) => { try { n.remove() } catch {} })
       inner.appendChild(buildSlipHeader(rates))
       inner.appendChild(clone)
-      inner.appendChild(buildSlipFooter(panelEl.getAttribute('data-receipt') || ''))
+      inner.appendChild(buildSlipFooter(panelEl.getAttribute('data-receipt') || '', rates))
       card.appendChild(inner)
       overlay.appendChild(card)
       document.body.appendChild(overlay)
