@@ -1422,6 +1422,11 @@ export function AppProvider({ children }) {
     // parchi below.
     const nameEmpty = !customer.id && !(customer.name && customer.name.trim())
     const entriesEmpty = !txns.length && !hasPurity
+    // Does this parchi carry any ادھار (credit) entry — تیزابی دیا/لیا, ادھار کیش
+    // دیا/لیا? Those are LEDGER records: they only exist against a customer, so a
+    // saved customer is mandatory for them. A parchi with only نقد and/or lab
+    // (purity/kacha) work belongs to no one in particular and saves nameless.
+    const hasUdhar = txns.some((t) => t.section === 'udhar')
     if (isEdit && nameEmpty) {
       if (entriesEmpty) {
         if (hasApi) await window.api.freeReceipt(rno)
@@ -1430,31 +1435,38 @@ export function AppProvider({ children }) {
         refresh()
         return { ok: true, receipt_no: rno, freed: true }
       }
-      return { ok: false, message: 'پہلے تمام اندراج ختم کریں، پھر نام ہٹائیں' }
+      // Clearing the name while ادھار entries remain would orphan them → wrong
+      // order. نقد/lab entries need no name, so they fall through and re-save
+      // nameless (customer_id null) instead of being blocked.
+      if (hasUdhar) return { ok: false, message: 'پہلے تمام اندراج ختم کریں، پھر نام ہٹائیں' }
     }
 
-    // Name mandatory for any parchi save (ledger + snapshot are keyed to a customer).
     // The customer must ALREADY be saved — ensureCustomer never creates one now.
+    // MANDATORY only for a parchi with ادھار entries; otherwise null is allowed.
     const cust = await ensureCustomer()
-    if (!cust || !cust.id) {
+    if (hasUdhar && (!cust || !cust.id)) {
       const typed = (customer.name || '').trim()
       return {
         ok: false,
         message: typed
           ? 'یہ کسٹمر محفوظ نہیں — فہرست سے منتخب کریں یا "+" سے نیا کسٹمر شامل کریں'
-          : 'پہلے کسٹمر منتخب کریں'
+          : 'براہِ کرم پہلے کسٹمر کا نام درج کریں'
       }
     }
+    // Nameless نقد/lab parchi → customer_id null (like manual اندراج rows). It shows
+    // in the نقد/lab/daybook reports with name "-", and — being keyed to no customer
+    // — never in an ادھار / balance / statement report.
+    const custId = (cust && cust.id) || null
 
     // Current line-items for this receipt (strip the UI-only `section` tag).
-    const rows = txns.map(({ section, ...row }) => ({ customer_id: cust.id, date: rates.date, ...row }))
+    const rows = txns.map(({ section, ...row }) => ({ customer_id: custId, date: rates.date, ...row }))
 
     // FULL snapshot payload so reopening restores every entry (purity line-items
     // via input+overrides+rates, plus the نقد/ادھار entries) — symmetric with
     // loadReceipt, which reads exactly these fields back.
     const payload = {
       receipt_no: rno,
-      customer: { id: cust.id, name: cust.name, mobile: cust.mobile },
+      customer: { id: custId, name: (cust && cust.name) || '', mobile: (cust && cust.mobile) || '' },
       input: { wazan: input.wazan, malawat: input.malawat },
       overrides,
       rates,
@@ -1475,7 +1487,7 @@ export function AppProvider({ children }) {
       }
       if (DEBUG_SAVE) console.log('[saveParchi] replaceReceipt', { rno, isEdit, rows })
       const res = await window.api.replaceReceipt({
-        receipt: { receipt_no: rno, type: 'parchi', customer_id: cust.id, date: rates.date, payload },
+        receipt: { receipt_no: rno, type: 'parchi', customer_id: custId, date: rates.date, payload },
         transactions: rows
       })
       if (DEBUG_SAVE) console.log('[saveParchi] replaceReceipt result', res)
