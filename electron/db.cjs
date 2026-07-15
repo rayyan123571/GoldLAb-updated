@@ -1383,7 +1383,10 @@ const api = {
         continue
       }
       const goldSign = t.direction === 'in' ? 1 : -1
-      gold += goldSign * (t.khalis_sona || 0)
+      // Bottom-bar تیزابی is a RAW-WEIGHT running counter: a gold entry adds/subtracts
+      // its full سونا وزن (sona_wazan), NOT khalis. Shop convention — this bottom total
+      // intentionally differs from the khalis-based reports; do not "fix" it back.
+      gold += goldSign * (t.sona_wazan || 0)
       // cash: money flowing into shop minus out
       if (t.category === 'gold_buy') cash -= t.qeemat || 0
       if (t.category === 'gold_sell') cash += t.qeemat || 0
