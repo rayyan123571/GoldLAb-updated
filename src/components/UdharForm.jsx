@@ -429,7 +429,8 @@ export default function UdharForm({ open, onClose }) {
       </div>
 
       {editRow && <EditModal row={editRow} onSave={saveEdit} onClose={() => setEditRow(null)} />}
-      {sodaStatus && <NayaSodaReport status={sodaStatus} from={from} to={to} onClose={() => setSodaStatus(null)} />}
+      {/* بھگتان / بقایا سودا: NO date filter — always show ALL entries (null from/to). */}
+      {sodaStatus && <NayaSodaReport status={sodaStatus} from={null} to={null} onClose={() => setSodaStatus(null)} />}
     </div>
   )
 }

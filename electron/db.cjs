@@ -141,7 +141,7 @@ CREATE TABLE IF NOT EXISTS naya_soda (
   wazan REAL,
   type TEXT,                        -- 'khareed' | 'farokht'
   date TEXT,                        -- YYYY-MM-DD
-  status TEXT DEFAULT 'bhugtan',    -- 'bhugtan' | 'bakaya'
+  status TEXT DEFAULT 'bakaya',     -- 'bhugtan' | 'bakaya'
   receipt_no INTEGER,               -- parchi the entry was saved under (nullable)
   created_at TEXT
 );
@@ -1118,7 +1118,7 @@ const api = {
         Number(r.wazan) || 0,
         r.type === 'farokht' ? 'farokht' : 'khareed',
         r.date || todayISO(),
-        'bhugtan',
+        'bakaya',
         (r.receipt_no != null && Number.isFinite(Number(r.receipt_no))) ? Number(r.receipt_no) : null,
         ts
       ]

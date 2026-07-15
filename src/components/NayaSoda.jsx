@@ -110,6 +110,36 @@ export default function NayaSoda() {
     }
   }
 
+  // Send the CURRENT (unsaved) form values to WhatsApp as text — same route the
+  // نقد / لیب رسید receipts use — WITHOUT saving or clearing the form.
+  const waSend = async () => {
+    const hasData = name.trim() || String(rate).trim() || String(wazan).trim()
+    if (!hasData) { showMsg({ ok: false, text: 'پہلے کچھ درج کریں' }); return }
+    const p = String(date || '').split('-')
+    const dispDate = (p.length === 3 && p[0]) ? `${p[2]}/${p[1]}/${p[0]}` : (date || '-')
+    const qism = type === 'farokht' ? 'فروخت' : 'خرید'
+    const text =
+      `نیا سودا\n` +
+      `نام: ${name || '-'}\n` +
+      `ریٹ: ${rate || '-'}\n` +
+      `وزن: ${wazan || '-'}\n` +
+      `قسم: ${qism}\n` +
+      `تاریخ: ${dispDate}`
+    // Copy the text so the operator can paste it after picking any contact.
+    try { await navigator.clipboard.writeText(text) } catch {}
+    // Same WhatsApp route the receipts use (desktop app → embedded web), empty
+    // mobile so the operator chooses the recipient; wa.me is the dev fallback.
+    try {
+      if (window.api && window.api.openWhatsApp) {
+        const r = await window.api.openWhatsApp({ mobile: '', text })
+        if (r && r.ok) { showMsg({ ok: true, text: 'واٹس ایپ کھل گیا — رابطہ منتخب کر کے پیسٹ کریں' }); return }
+      }
+    } catch {}
+    const url = `https://wa.me/?text=${encodeURIComponent(text)}`
+    if (typeof window !== 'undefined') window.open(url, '_blank')
+    showMsg({ ok: true, text: 'واٹس ایپ کھل گیا — رابطہ منتخب کر کے پیسٹ کریں' })
+  }
+
   return (
     <div className="border border-line bg-white flex flex-col h-full">
       <div className="panel-title urdu">نیا سودا</div>
@@ -171,6 +201,7 @@ export default function NayaSoda() {
           >
             محفوظ کریں
           </button>
+          <button type="button" onClick={waSend} className="abtn abtn-green" title="واٹس ایپ پر بھیجیں">WhatsApp</button>
           {msg && (
             <span className={`urdu text-[12px] font-bold ${msg.ok ? 'text-emerald-700' : 'text-red-600'}`}>{msg.text}</span>
           )}

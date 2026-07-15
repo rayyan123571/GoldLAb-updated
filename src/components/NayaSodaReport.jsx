@@ -1,13 +1,18 @@
 import React, { useEffect, useState } from 'react'
+import { GRAMS_PER_TOLA } from '../logic/units'
 
 // نیا سودا report — shared by the بھگتان سودا and بقایا سودا buttons (status
 // prop = 'bhugtan' | 'bakaya'). Reads ONLY the naya_soda table via
 // window.api.listNayaSoda; never touches ledger data.
 //
-// The leading checkbox appears ONLY in the بھگتان report. Ticking a row opens a
-// styled confirmation modal; on ہاں the row moves to بقایا (setNayaSodaStatus)
-// and the list refreshes so it disappears here and shows under بقایا. The بقایا
-// report is view-only (data columns, no checkbox).
+// New deals land in بقایا first. Each report has its own control:
+//   • بقایا — LEADING checkboxes (plus a select-all in the header) tick rows into
+//     a selection; the toolbar's "منتخب (N) بھگتان میں منتقل کریں" button opens ONE
+//     confirm modal, and on ہاں every selected row moves to بھگتان
+//     (setNayaSodaStatus, run sequentially) and disappears from here.
+//   • بھگتان — a TRAILING ختم button; on ہاں that single row is DELETED outright
+//     (deleteNayaSoda) via the styled confirm modal and is gone for good.
+// Either way the list refreshes so the acted-on rows leave the current view.
 //
 // Print / thermal / PDF mirror the تیزابی (gold) reports' ReportView toolbar in
 // UdharForm.jsx: same applyThermal() body-class + @page trick, same
@@ -27,8 +32,16 @@ const TD = 'text-[14px] font-bold border border-gray-300 px-2 py-1.5 text-center
 // Sum the وزن of a row list; format trims trailing zeros (max 4 dp).
 const sumWazan = (list) => list.reduce((s, r) => s + (Number(r.wazan) || 0), 0)
 const fmtW = (n) => String(Math.round((Number(n) || 0) * 10000) / 10000)
-// SIMPLE average rate of a row list: mean of its rate values (0 for an empty list).
-const avgRate = (list) => (list.length ? list.reduce((s, r) => s + (Number(r.rate) || 0), 0) / list.length : 0)
+// Weight-weighted average per-tola rate. Rate is per-tola, wazan is in grams, so
+// each row's amount = (wazan / GRAMS_PER_TOLA) * rate, and the average rate is
+// (Σ amount * GRAMS_PER_TOLA) / Σ wazan. Returns 0 for an empty/zero-weight list.
+const avgRate = (list) => {
+  const totalWazan = list.reduce((s, r) => s + (Number(r.wazan) || 0), 0)
+  if (!totalWazan) return 0
+  const totalAmount = list.reduce(
+    (s, r) => s + ((Number(r.wazan) || 0) / GRAMS_PER_TOLA) * (Number(r.rate) || 0), 0)
+  return (totalAmount * GRAMS_PER_TOLA) / totalWazan
+}
 // Rate formatting — matches the ریٹ column (plain number), rounded to 2 dp max.
 const fmtRate = (n) => String(Math.round((Number(n) || 0) * 100) / 100)
 
@@ -111,11 +124,18 @@ function ThermalNaya({ rows, title, range, status }) {
 
 export default function NayaSodaReport({ status, from, to, onClose }) {
   const [rows, setRows] = useState([])
-  // id of the row awaiting the "کیا آپ اسے یہاں سے ختم کرنا چاہتے ہیں؟" confirm.
+  // id of the row awaiting confirmation, plus what ہاں will do: 'move' (بقایا →
+  // بھگتان) or 'delete' (remove outright). Both null when no modal is open.
   const [confirmId, setConfirmId] = useState(null)
+  const [confirmAction, setConfirmAction] = useState('move')
+  // بقایا multi-select: ids ticked for the bulk بھگتان transfer, and whether the
+  // one confirm modal for that bulk action is open.
+  const [selected, setSelected] = useState(() => new Set())
+  const [confirmBulk, setConfirmBulk] = useState(false)
   const [thermal, setThermal] = useState(false) // default to the normal wide view
   const [note, setNote] = useState('')
-  const showCheckbox = status === 'bhugtan' // checkbox column ONLY in بھگتان
+  const showMoveCheckbox = status === 'bakaya'  // LEADING move checkbox — بقایا only
+  const showDeleteBtn = status === 'bhugtan'    // TRAILING ختم button — بھگتان only
   const title = status === 'bhugtan' ? 'بھگتان سودا' : 'بقایا سودا'
   const fromDisp = from ? isoToDisp(from) : 'ابتدا'
   const toDisp = to ? isoToDisp(to) : 'آج تک'
@@ -130,18 +150,52 @@ export default function NayaSodaReport({ status, from, to, onClose }) {
   const avgBuyRate = avgRate(buyRows)
   const avgSellRate = avgRate(sellRows)
 
+  // Select-all state over the CURRENTLY LISTED rows: fully ticked vs. partial
+  // (the header checkbox renders indeterminate for the partial case).
+  const allSelected = rows.length > 0 && rows.every((r) => selected.has(r.id))
+  const someSelected = rows.some((r) => selected.has(r.id)) && !allSelected
+
   const load = async () => {
     if (!window.api) { setRows([]); return }
     setRows((await window.api.listNayaSoda(status, from, to)) || [])
   }
-  useEffect(() => { load() }, [status, from, to])
+  // A different report / date range lists different rows — drop any stale ticks.
+  useEffect(() => { setSelected(new Set()); load() }, [status, from, to])
 
-  // Confirmed (ہاں): move the row بھگتان → بقایا, close the modal, refresh.
-  const confirmMove = async () => {
+  // Tick / untick one row. Ticking no longer opens the confirm modal — the rows
+  // stay ticked until the toolbar's bulk transfer button acts on them.
+  const toggleRow = (id) => setSelected((prev) => {
+    const next = new Set(prev)
+    if (next.has(id)) next.delete(id); else next.add(id)
+    return next
+  })
+  // Header checkbox — fill the set with every listed row, or empty it.
+  const toggleAll = () => setSelected(allSelected ? new Set() : new Set(rows.map((r) => r.id)))
+
+  // Open the confirm modal for a row, tagged with the action ہاں will perform.
+  const askConfirm = (id, action) => { setConfirmAction(action); setConfirmId(id) }
+
+  // Confirmed (ہاں), single row: either move it بقایا → بھگتان, or delete it
+  // outright (بھگتان). Then close the modal and refresh so the row leaves this view.
+  const confirmYes = async () => {
     const id = confirmId
+    const action = confirmAction
     setConfirmId(null)
     if (id == null || !window.api) return
-    await window.api.setNayaSodaStatus(id, 'bakaya')
+    if (action === 'delete') await window.api.deleteNayaSoda(id)
+    else await window.api.setNayaSodaStatus(id, 'bhugtan')
+    load()
+  }
+
+  // Confirmed (ہاں), bulk: move every ticked بقایا row to بھگتان. Sequential so the
+  // writes don't race, then clear the ticks and refresh — the moved rows leave this
+  // view and show up under بھگتان.
+  const confirmBulkYes = async () => {
+    const ids = [...selected]
+    setConfirmBulk(false)
+    if (!ids.length || !window.api) { setSelected(new Set()); return }
+    for (const id of ids) await window.api.setNayaSodaStatus(id, 'bhugtan')
+    setSelected(new Set())
     load()
   }
 
@@ -196,6 +250,16 @@ export default function NayaSodaReport({ status, from, to, onClose }) {
             >
               تھرمل ({THERMAL_PAPER_MM}mm)
             </button>
+            {/* بقایا only — bulk transfer of every ticked row; hidden while nothing is ticked. */}
+            {showMoveCheckbox && selected.size > 0 && (
+              <button
+                type="button"
+                onClick={() => setConfirmBulk(true)}
+                className="urdu text-[12px] font-semibold text-white bg-emerald-600 rounded-md px-3 py-1.5 hover:bg-emerald-700 transition-colors"
+              >
+                منتخب ({selected.size}) بھگتان میں منتقل کریں
+              </button>
+            )}
             <div className="flex-1" />
             {note && <span className="urdu text-[11px] text-emerald-600">{note}</span>}
             <button type="button" onClick={doPrint} className="urdu text-[12px] font-semibold text-gray-700 border border-gray-300 rounded-md px-3 py-1.5 hover:bg-gray-100 transition-colors">پرنٹ 🖨</button>
@@ -224,25 +288,37 @@ export default function NayaSodaReport({ status, from, to, onClose }) {
               <table className="w-full border-collapse">
                 <thead>
                   <tr>
-                    {showCheckbox && <th className={`${TH} no-print`}>&nbsp;</th>}
+                    {showMoveCheckbox && (
+                      <th className={`${TH} no-print w-10`}>
+                        <input
+                          type="checkbox"
+                          checked={allSelected}
+                          ref={(el) => { if (el) el.indeterminate = someSelected }}
+                          onChange={toggleAll}
+                          title="سب منتخب کریں"
+                          className="scale-125 cursor-pointer"
+                        />
+                      </th>
+                    )}
                     <th className={TH}>نام</th>
                     <th className={TH}>ریٹ</th>
                     <th className={TH}>وزن</th>
                     <th className={TH}>قسم</th>
                     <th className={TH}>تاریخ</th>
+                    {showDeleteBtn && <th className={`${TH} no-print`}>&nbsp;</th>}
                   </tr>
                 </thead>
                 <tbody>
                   {rows.map((r) => (
                     // بقایا report only: colour each row by قسم — خرید green, فروخت light red.
                     <tr key={r.id} className={`hover:bg-yellowCell/60 ${status === 'bakaya' ? (r.type === 'khareed' ? 'bg-emerald-100' : r.type === 'farokht' ? 'bg-rose-100' : '') : ''}`}>
-                      {showCheckbox && (
+                      {showMoveCheckbox && (
                         <td className={`${TD} w-10 no-print`}>
                           <input
                             type="checkbox"
-                            checked={false}
-                            onChange={() => setConfirmId(r.id)}
-                            title="بقایا میں منتقل کریں"
+                            checked={selected.has(r.id)}
+                            onChange={() => toggleRow(r.id)}
+                            title="بھگتان میں منتقل کرنے کے لیے منتخب کریں"
                             className="scale-125 cursor-pointer"
                           />
                         </td>
@@ -252,12 +328,24 @@ export default function NayaSodaReport({ status, from, to, onClose }) {
                       <td className={TD} dir="ltr">{r.wazan}</td>
                       <td className={`${TD} urdu`}>{TYPE_LABEL[r.type] || r.type || '-'}</td>
                       <td className={TD} dir="ltr">{isoToDisp(r.date)}</td>
+                      {showDeleteBtn && (
+                        <td className={`${TD} w-10 no-print`}>
+                          <button
+                            type="button"
+                            onClick={() => askConfirm(r.id, 'delete')}
+                            title="ختم کریں"
+                            className="urdu w-7 h-7 flex items-center justify-center rounded-md text-rose-600 hover:bg-rose-100 transition-colors mx-auto"
+                          >
+                            ✕
+                          </button>
+                        </td>
+                      )}
                     </tr>
                   ))}
                 </tbody>
                 <tfoot>
                   <tr className="bg-amber-50 border-t-2 border-amber-300 font-bold urdu text-[13px] text-amber-800">
-                    <td colSpan={(showCheckbox ? 1 : 0) + 5} className="px-3 py-2.5">
+                    <td colSpan={(showMoveCheckbox ? 1 : 0) + 5 + (showDeleteBtn ? 1 : 0)} className="px-3 py-2.5">
                       <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1" dir="rtl">
                         <span>کل وزن: <span className="tabular-nums" dir="ltr">{fmtW(totalWazan)}</span></span>
                         <span>خرید وزن: <span className="tabular-nums" dir="ltr">{fmtW(khareedWazan)}</span></span>
@@ -275,14 +363,28 @@ export default function NayaSodaReport({ status, from, to, onClose }) {
       </div>
 
       {/* Styled confirmation — replaces window.confirm. Backdrop click or نہیں
-          cancels (checkbox stays unticked); ہاں moves the row to بقایا. */}
+          cancels; ہاں moves the row to بھگتان (بقایا) or deletes it (بھگتان). */}
       {confirmId != null && (
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={() => setConfirmId(null)}>
           <div dir="rtl" className="bg-white rounded-md shadow-lg p-5 w-[320px] max-w-[90vw]" onClick={(e) => e.stopPropagation()}>
-            <div className="urdu text-[16px] font-bold text-black text-center mb-4">کیا آپ اسے یہاں سے ختم کرنا چاہتے ہیں؟</div>
+            <div className="urdu text-[16px] font-bold text-black text-center mb-4">{confirmAction === 'delete' ? 'کیا آپ اسے ختم کرنا چاہتے ہیں؟' : 'کیا آپ اسے بھگتان میں منتقل کرنا چاہتے ہیں؟'}</div>
             <div className="flex items-center justify-center gap-3">
-              <button type="button" onClick={confirmMove} className="urdu bg-emerald-600 text-white text-[15px] font-bold px-6 py-2 rounded-md hover:bg-emerald-700 transition-colors">ہاں</button>
+              <button type="button" onClick={confirmYes} className="urdu bg-emerald-600 text-white text-[15px] font-bold px-6 py-2 rounded-md hover:bg-emerald-700 transition-colors">ہاں</button>
               <button type="button" onClick={() => setConfirmId(null)} className="urdu border border-gray-400 bg-gray-100 text-black text-[15px] font-bold px-6 py-2 rounded-md hover:bg-gray-200 transition-colors">نہیں</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Bulk confirmation (بقایا) — ONE modal covering every ticked row; ہاں moves
+          them all to بھگتان. Backdrop click or نہیں cancels and keeps the ticks. */}
+      {confirmBulk && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={() => setConfirmBulk(false)}>
+          <div dir="rtl" className="bg-white rounded-md shadow-lg p-5 w-[340px] max-w-[90vw]" onClick={(e) => e.stopPropagation()}>
+            <div className="urdu text-[16px] font-bold text-black text-center mb-4">{`کیا آپ منتخب ${selected.size} سودے بھگتان میں منتقل کرنا چاہتے ہیں؟`}</div>
+            <div className="flex items-center justify-center gap-3">
+              <button type="button" onClick={confirmBulkYes} className="urdu bg-emerald-600 text-white text-[15px] font-bold px-6 py-2 rounded-md hover:bg-emerald-700 transition-colors">ہاں</button>
+              <button type="button" onClick={() => setConfirmBulk(false)} className="urdu border border-gray-400 bg-gray-100 text-black text-[15px] font-bold px-6 py-2 rounded-md hover:bg-gray-200 transition-colors">نہیں</button>
             </div>
           </div>
         </div>
