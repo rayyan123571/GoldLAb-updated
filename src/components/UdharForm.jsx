@@ -832,7 +832,7 @@ const labFromPayload = (payload, baseRates = {}) => {
 // <CashReceipt/> <CreditReceipt/> <LabReceipt/> <RecoveryReceipt/> render the
 // parchi EXACTLY as it looks on the main page. No formula is touched.
 const blankGold = () => ({ wazan: '', point: '100', rate: '' })
-function buildParchiCtx({ payload, snapRows, receiptNo, baseRates, hasApi, ledger }) {
+function buildParchiCtx({ payload, snapRows, receiptNo, baseRates, hasApi }) {
   const rates = { ...(baseRates || {}), ...(payload.rates || {}) }
   const input = payload.input || { wazan: '', malawat: '' }
   const overrides = payload.overrides || {}
@@ -872,13 +872,13 @@ function buildParchiCtx({ payload, snapRows, receiptNo, baseRates, hasApi, ledge
     ujratKaSona: sb.ujratKaSona != null ? sb.ujratKaSona : true,
     sonaDiya: sb.sonaDiya ?? '', cashDiya: sb.cashDiya ?? '',
     savedFlags: { naqad: true, udhar: true, lab: true, wasooli: true },
-    // A saved (not brand-new) parchi: openReceiptNo === receiptNo makes
-    // CreditReceipt read the ledger balance instead of re-adding live entries —
-    // identical to reopening the parchi on the main screen.
-    openReceiptNo: receiptNo,
-    // This parchi's OWN running (cumulative) ledger balance — so the ادھار receipt
-    // shows this parchi's باقی دینا/لینا, not the customer's grand total.
-    ledger,
+    // No `ledger` is injected on purpose: CreditReceipt fetches
+    // getCustomerLedger(customer.id, receiptNo) itself, so this parchi's سابقہ is
+    // the balance of the parchis numbered BEFORE it — the same number the main
+    // screen shows and the same one that was printed on the paper. Injecting a
+    // running balance computed here would be wrong twice over: it would be
+    // relative to the statement's date filter, and it would re-derive the sign
+    // maths that db.cjs already owns.
     hasApi, bump: 0, refresh: () => {}, printSlips: () => {}
   }
 }
@@ -895,11 +895,6 @@ function groupParchis(rows, snapshots = {}, baseRates = {}, hasApi = false) {
     if (!map.has(key)) { map.set(key, []); order.push(key) }
     map.get(key).push(r)
   }
-  // Running (cumulative) ledger balance PER CUSTOMER, accumulated in chronological
-  // order (rows arrive date/receipt-ordered). Each parchi is given the balance
-  // THROUGH itself — same sign convention as getCustomerLedger — so its ادھار
-  // receipt shows that parchi's own باقی دینا/لینا instead of the grand total.
-  const acc = new Map() // customer_id -> { gold, cash }
   return order.map((rno) => {
     const prows = map.get(rno)
     const snap = snapshots[rno] || null
@@ -907,13 +902,6 @@ function groupParchis(rows, snapshots = {}, baseRates = {}, hasApi = false) {
     const snapRows = (snap && snap.rows) || prows
     const entries = payload.entries || {}
     const first = prows[0]
-    const pnet = statementTotals(prows)
-    const cid = first.customer_id
-    const a = acc.get(cid) || { gold: 0, cash: 0 }
-    a.gold += pnet.netGold
-    a.cash += pnet.netCash
-    acc.set(cid, a)
-    const ledger = { balance_gold: a.gold, balance_cash: a.cash }
     const naqadRows = prows.filter((r) => NAQAD_CATS.includes(r.category))
     const udharRows = prows.filter((r) => UDHAR_CATS.includes(r.category))
     const kachaRows = prows.filter((r) => r.category === 'kacha_gold_take')
@@ -928,7 +916,7 @@ function groupParchis(rows, snapshots = {}, baseRates = {}, hasApi = false) {
       // وصولی accompanies the lab flow (same as the main screen's LeftReceipts).
       wasooli: !!labInfo
     }
-    const ctx = buildParchiCtx({ payload, snapRows, receiptNo: rno, baseRates, hasApi, ledger })
+    const ctx = buildParchiCtx({ payload, snapRows, receiptNo: rno, baseRates, hasApi })
     return {
       receipt_no: rno,
       date: first.date,
