@@ -282,6 +282,7 @@ export function AppProvider({ children }) {
   const [openReceiptNo, setOpenReceiptNo] = useState(null)
   const [udharOpen, setUdharOpen] = useState(false) // ادھار form/report modal
   const [akhrajatOpen, setAkhrajatOpen] = useState(false) // اخراجات (expenses) modal
+  const [hisabOpen, setHisabOpen] = useState(false) // حساب (cash position) modal
   // Extended customer shape. mobile2/telephone/address/imagePath are new; their
   // persistence needs an upsertCustomer backend extension (see note), but the
   // form and live state work with them today.
@@ -352,11 +353,14 @@ export function AppProvider({ children }) {
 
   const refresh = useCallback(() => setBump((b) => b + 1), [])
 
-  // Modal tabs (ادھار / اخراجات) open over the main workflow. Only one at a time.
-  const openUdhar = useCallback(() => { setScreen('main'); setAkhrajatOpen(false); setUdharOpen(true) }, [])
+  // Modal tabs (ادھار / اخراجات / حساب) open over the main workflow. Only one at a
+  // time — every opener closes the other two.
+  const openUdhar = useCallback(() => { setScreen('main'); setAkhrajatOpen(false); setHisabOpen(false); setUdharOpen(true) }, [])
   const closeUdhar = useCallback(() => setUdharOpen(false), [])
-  const openAkhrajat = useCallback(() => { setScreen('main'); setUdharOpen(false); setAkhrajatOpen(true) }, [])
+  const openAkhrajat = useCallback(() => { setScreen('main'); setUdharOpen(false); setHisabOpen(false); setAkhrajatOpen(true) }, [])
   const closeAkhrajat = useCallback(() => setAkhrajatOpen(false), [])
+  const openHisab = useCallback(() => { setScreen('main'); setUdharOpen(false); setAkhrajatOpen(false); setHisabOpen(true) }, [])
+  const closeHisab = useCallback(() => setHisabOpen(false), [])
 
   // Initial load
   useEffect(() => {
@@ -1792,6 +1796,7 @@ export function AppProvider({ children }) {
     savedFlags, setSavedFlags,
     udharOpen, openUdhar, closeUdhar,
     akhrajatOpen, openAkhrajat, closeAkhrajat,
+    hisabOpen, openHisab, closeHisab,
     printSlips,
     shareSlipWhatsApp,
     hasApi
