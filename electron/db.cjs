@@ -1263,11 +1263,28 @@ const api = {
     return { ok: true, receipt_no: rno, count: transactions.length }
   },
 
-  getCustomerLedger(customerId) {
+  // beforeReceiptNo (optional): count ONLY the parchis numbered BEFORE this one —
+  // which is exactly the ادھار receipt's سابقہ ("what this customer owed before this
+  // parchi"). It used to derive that as (full balance − the on-screen form's net),
+  // which quietly assumed the ledger already held what the form shows. It does not,
+  // the moment you type an entry onto a parchi that is already saved: the ledger has
+  // no such row yet, the subtraction ran backwards, and سابقہ went NEGATIVE on a
+  // customer's very first receipt (چاندی دی 34 → سابقہ −34). Worse, on an OLD parchi
+  // the live total still contained every LATER parchi, so سابقہ drifted every time
+  // the customer paid again — the printed paper and the screen stopped agreeing.
+  //
+  // "Before", not "any other parchi": navigating BACK to parchi 1 must still show no
+  // سابقہ even once parchi 2 exists — a later parchi is not history. Rows with no
+  // receipt_no are kept (they belong to no parchi, so this one never owns them).
+  // Called with no second argument (statements, customer list) it is unchanged.
+  getCustomerLedger(customerId, beforeReceiptNo) {
     // manual اندراج rows carry no customer_id, but exclude by category too for safety.
+    const before = Number(beforeReceiptNo)
+    const hasBefore = Number.isFinite(before)
     const txns = query(
-      "SELECT * FROM transactions WHERE customer_id = ? AND category <> 'adjustment' ORDER BY ts ASC, id ASC",
-      [customerId]
+      `SELECT * FROM transactions WHERE customer_id = ? AND category <> 'adjustment'
+       ${hasBefore ? 'AND (receipt_no IS NULL OR receipt_no < ?)' : ''} ORDER BY ts ASC, id ASC`,
+      hasBefore ? [customerId, before] : [customerId]
     )
     let gold = 0
     let cash = 0

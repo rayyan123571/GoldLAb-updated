@@ -69,7 +69,9 @@ contextBridge.exposeInMainWorld('api', {
   // اندراج رپورٹ — manual adjustment transactions only (date range optional).
   getAdjustmentsReport: (opts) => call('getAdjustmentsReport', opts),
   getKachaTotalForDate: (date) => call('getKachaTotalForDate', date),
-  getCustomerLedger: (id) => call('getCustomerLedger', id),
+  // beforeReceiptNo (optional) → the balance as it stood BEFORE that parchi (سابقہ).
+  // Omitted by the statement / customer-list callers, which want the live total.
+  getCustomerLedger: (id, beforeReceiptNo) => call('getCustomerLedger', id, beforeReceiptNo),
   listCustomersWithBalances: () => call('listCustomersWithBalances'),
   getDaybook: (date) => call('getDaybook', date),
   listDates: () => call('listDates'),
