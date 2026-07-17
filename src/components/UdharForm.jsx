@@ -4,7 +4,13 @@ import { fmtMoney, fmtNum, gramsToTMR } from '../logic/units.js'
 import { computeTable, buildLabReceipt } from '../logic/purity.js'
 import { CreditReceipt } from './Receipts.jsx'
 import DateField from './DateField.jsx'
+import GhostNameInput from './GhostNameInput.jsx'
 import NayaSodaReport from './NayaSodaReport.jsx'
+
+// One skin for both customer filter boxes (کوڈ / نام). GhostNameInput's ghost
+// mirror wears the SAME classes as its input, so these box metrics have to live
+// in one constant — two copies and the ghost text drifts out of alignment.
+const FILTER_INPUT = 'w-full border border-gray-400 bg-white text-[15px] font-bold px-2 py-1.5 rounded-sm focus:outline-none focus:ring-1 focus:ring-blue-500'
 
 // ─── Report buttons, three groups. flow 'in' = INTO shop (green), 'out' = OUT (red)
 const GROUP1 = [
@@ -329,24 +335,34 @@ export default function UdharForm({ open, onClose }) {
   const saveEdit = async (id, fields) => { await editTransaction(id, fields); setEditRow(null); reload() }
 
   // Code + name dropdowns are kept in sync by the customer id.
-  const onPickCustomer = (e) => {
-    const id = e.target.value
-    const c = customers.find((x) => String(x.id) === id)
-    setCustCode(id)
-    setCustName(c ? c.name : '')
-  }
-
-  // نام typed (or picked from the datalist). Resolve it to a customer CODE only
-  // when exactly ONE saved customer carries that name — then the report filters on
-  // that id, which is exact. Two customers can share a name, and the list shows
-  // them as identical entries, so adopting the first id would quietly report the
-  // wrong person's ledger; leaving the code empty keeps it a name search and both
-  // appear. A partial name stays a search too — that is the point of typing.
+  // نام typed (or ghost-accepted). Resolve it to a customer CODE only when exactly
+  // ONE saved customer carries that name — then the report filters on that id,
+  // which is exact. Two customers can share a name, so adopting the first id would
+  // quietly report the wrong person's ledger; leaving the code empty keeps it a
+  // name search and both appear. A partial name stays a search too — that is the
+  // point of typing.
   const onTypeCustomerName = (v) => {
     setCustName(v)
     const t = v.trim().toLowerCase()
     const exact = t ? customers.filter((c) => String(c.name || '').trim().toLowerCase() === t) : []
     setCustCode(exact.length === 1 ? String(exact[0].id) : '')
+  }
+
+  // کوڈ typed (or picked). Digits only — a code is a number. Mirror the owner's
+  // name into the نام box so the two always describe the same customer.
+  const onTypeCustomerCode = (v) => {
+    const code = String(v || '').replace(/\D/g, '')
+    setCustCode(code)
+    const c = customers.find((x) => String(x.id) === code)
+    setCustName(c ? c.name : '')
+  }
+
+  // Enter in either filter box runs the same report as the کسٹمر کی تفصیلی رسید
+  // button, so a customer can be looked up without reaching for the mouse.
+  const onFilterEnter = (e) => {
+    if (e.key !== 'Enter') return
+    e.preventDefault()
+    loadReport({ type: 'g3' })
   }
 
   // ── The ORIGINAL 8 buttons in a 2×4 grid (DOM order = RTL right col then left).
@@ -413,28 +429,37 @@ export default function UdharForm({ open, onClose }) {
                 <DateField label="To Date:" iso={to} setIso={setTo} />
                 <label className="flex items-center gap-2">
                   <span className="urdu text-[14px] font-bold text-black w-[120px] shrink-0">کسٹمر کا کوڈ :</span>
-                  <select className="flex-1 min-w-0 border border-gray-400 bg-white text-[15px] font-bold px-2 py-1.5 rounded-sm focus:outline-none focus:ring-1 focus:ring-blue-500" value={custCode} onChange={onPickCustomer}>
-                    <option value="">—</option>
-                    {customers.map((c) => <option key={c.id} value={c.id}>{c.id}</option>)}
-                  </select>
+                  {/* Type a code or pick one; the list shows each code with its owner's
+                      name. Digits only, LTR like every other number in the app. */}
+                  <input
+                    list="udhar-customer-codes"
+                    value={custCode}
+                    onChange={(e) => onTypeCustomerCode(e.target.value)}
+                    onKeyDown={onFilterEnter}
+                    dir="ltr"
+                    inputMode="numeric"
+                    className={FILTER_INPUT}
+                  />
+                  <datalist id="udhar-customer-codes">
+                    {customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                  </datalist>
                 </label>
                 <label className="flex items-center gap-2">
                   <span className="urdu text-[14px] font-bold text-black w-[120px] shrink-0">کسٹمر کا نام :</span>
-                  {/* Type to search, or pick from the list — the datalist keeps every
-                      saved customer one click away while still allowing a partial
-                      name. Enter runs the same report as the تفصیلی رسید button, so a
-                      name can be looked up without reaching for the mouse. */}
-                  <input
-                    list="udhar-customer-names"
+                  {/* The app's own customer-name control (same as the main screen and
+                      the customer form): inline ghost completion of a saved name,
+                      Tab/→ accepts. dir="auto" so the caret and the text run the way
+                      the NAME does — Latin left-to-right, Urdu right-to-left — instead
+                      of forcing the panel's RTL onto an English name. */}
+                  <GhostNameInput
                     value={custName}
                     onChange={(e) => onTypeCustomerName(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); loadReport({ type: 'g3' }) } }}
-                    placeholder="نام لکھیں یا فہرست سے چنیں"
-                    className="urdu flex-1 min-w-0 border border-gray-400 bg-white text-[15px] font-bold px-2 py-1.5 rounded-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    onKeyDown={onFilterEnter}
+                    hasApi={hasApi}
+                    dir="auto"
+                    wrapperClassName="flex-1 min-w-0"
+                    inputClassName={`${FILTER_INPUT} text-start`}
                   />
-                  <datalist id="udhar-customer-names">
-                    {customers.map((c) => <option key={c.id} value={c.name} />)}
-                  </datalist>
                 </label>
                 <button
                   type="button"
