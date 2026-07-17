@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useApp } from '../state/store.jsx'
 import { fmtMoney, fmtNum, gramsToTMR } from '../logic/units.js'
 import { computeTable, buildLabReceipt } from '../logic/purity.js'
-import { RecoveryReceipt, LabReceipt, CreditReceipt, CashReceipt } from './Receipts.jsx'
+import { CreditReceipt } from './Receipts.jsx'
 import DateField from './DateField.jsx'
 import NayaSodaReport from './NayaSodaReport.jsx'
 
@@ -829,8 +829,9 @@ const labFromPayload = (payload, baseRates = {}) => {
 // reconstruction store.jsx loadReceipt does — nقد/ادھار entries are rebuilt from
 // the transaction ROWS (source of truth), the purity rows from input+overrides+
 // rates — but assembled into a plain object instead of React state, so the real
-// <CashReceipt/> <CreditReceipt/> <LabReceipt/> <RecoveryReceipt/> render the
-// parchi EXACTLY as it looks on the main page. No formula is touched.
+// <CreditReceipt/> renders the parchi's ادھار کی رسید EXACTLY as it looks on the
+// main page. No formula is touched. (This view shows the ادھار رسید only; the
+// parchi's other receipts stay saved and still open from the main screen.)
 const blankGold = () => ({ wazan: '', point: '100', rate: '' })
 function buildParchiCtx({ payload, snapRows, receiptNo, baseRates, hasApi }) {
   const rates = { ...(baseRates || {}), ...(payload.rates || {}) }
@@ -1018,10 +1019,11 @@ function ParchiReceipts({ p, thermal }) {
   const DH = 456
   return (
     <div className={`flex ${thermal ? 'flex-col' : 'flex-row flex-wrap'} gap-2 justify-start`} dir="ltr">
-      {p.types.naqad && <Tile h={DH}><CashReceipt ctx={ctx} embed /></Tile>}
+      {/* کسٹمر تفصیل shows the ادھار کی رسید ONLY. A parchi's نقد / لیب / وصولی
+          receipts are still saved and still open from the main screen — this view
+          just doesn't render them. Its totals were always ادھار-only (UDHAR_CATS),
+          so the numbers on this page already matched what is shown here. */}
       {p.types.udhar && <Tile h={DH}><CreditReceipt ctx={ctx} embed /></Tile>}
-      {p.types.lab && <Tile h={DH}><LabReceipt row={p.labRow} lab={p.lab} ctx={ctx} embed /></Tile>}
-      {p.types.wasooli && <Tile h={DH}><RecoveryReceipt row={p.labRow} lab={p.lab} ctx={ctx} embed /></Tile>}
       {/* No main-page receipt exists for a bare raw-gold intake — show its figure
           so nothing is lost, without mislabeling it. */}
       {!any && p.kachaRows.map((r) => (
