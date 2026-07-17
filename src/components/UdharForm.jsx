@@ -261,11 +261,26 @@ export default function UdharForm({ open, onClose }) {
       // kind/category but NOT lab detail — that lives in the receipt payload).
       const rnos = [...new Set(rows.map((r) => r.receipt_no).filter((n) => n != null))]
       const snapshots = {}
+      // Each parchi's سابقہ — the balance of the parchis numbered BEFORE it —
+      // fetched ONCE here, from the DB, by the same call the main screen makes. It
+      // is handed to the receipt so it renders synchronously: a per-panel fetch
+      // would leave every number at 0 for a moment and flash on each re-render.
+      // Not date-filtered (unlike `rows`), so a filtered statement still shows the
+      // سابقہ that was printed on the paper. Keyed per parchi's OWN customer, since
+      // a name filter can match more than one.
+      const ledgers = {}
       if (hasApi && rnos.length) {
-        const fetched = await Promise.all(rnos.map((n) => window.api.getReceiptByNo(n).catch(() => null)))
-        rnos.forEach((n, i) => { snapshots[n] = fetched[i] })
+        const custOf = {}
+        for (const r of rows) if (r.receipt_no != null && custOf[r.receipt_no] == null) custOf[r.receipt_no] = r.customer_id
+        const [fetched, leds] = await Promise.all([
+          Promise.all(rnos.map((n) => window.api.getReceiptByNo(n).catch(() => null))),
+          Promise.all(rnos.map((n) => (custOf[n] != null
+            ? window.api.getCustomerLedger(custOf[n], n).catch(() => null)
+            : null)))
+        ])
+        rnos.forEach((n, i) => { snapshots[n] = fetched[i]; ledgers[n] = leds[i] })
       }
-      const parchis = groupParchis(rows, snapshots, rates, hasApi)
+      const parchis = groupParchis(rows, snapshots, rates, hasApi, ledgers)
       setReport({ group: 3, rows, parchis, meta: { customer: customerLabel(), from: from || 'ابتدا', to: to || 'آج تک' } })
     } else if (d.type === 'kacha') {
       // کچا سونا لیا — per-customer aggregate (no customer filter = all customers).
@@ -833,7 +848,7 @@ const labFromPayload = (payload, baseRates = {}) => {
 // main page. No formula is touched. (This view shows the ادھار رسید only; the
 // parchi's other receipts stay saved and still open from the main screen.)
 const blankGold = () => ({ wazan: '', point: '100', rate: '' })
-function buildParchiCtx({ payload, snapRows, receiptNo, baseRates, hasApi }) {
+function buildParchiCtx({ payload, snapRows, receiptNo, baseRates, hasApi, ledger }) {
   const rates = { ...(baseRates || {}), ...(payload.rates || {}) }
   const input = payload.input || { wazan: '', malawat: '' }
   const overrides = payload.overrides || {}
@@ -873,13 +888,13 @@ function buildParchiCtx({ payload, snapRows, receiptNo, baseRates, hasApi }) {
     ujratKaSona: sb.ujratKaSona != null ? sb.ujratKaSona : true,
     sonaDiya: sb.sonaDiya ?? '', cashDiya: sb.cashDiya ?? '',
     savedFlags: { naqad: true, udhar: true, lab: true, wasooli: true },
-    // No `ledger` is injected on purpose: CreditReceipt fetches
-    // getCustomerLedger(customer.id, receiptNo) itself, so this parchi's سابقہ is
-    // the balance of the parchis numbered BEFORE it — the same number the main
-    // screen shows and the same one that was printed on the paper. Injecting a
-    // running balance computed here would be wrong twice over: it would be
-    // relative to the statement's date filter, and it would re-derive the sign
-    // maths that db.cjs already owns.
+    // This parchi's سابقہ, already fetched from the DB by the caller
+    // (getCustomerLedger(customer_id, receiptNo) — the balance of the parchis
+    // numbered BEFORE this one, exactly what the main screen shows and what was
+    // printed on the paper). Passing it in means the receipt renders it on the
+    // first paint instead of fetching per panel and flashing 0. It is the
+    // database's own answer — never a balance re-derived here.
+    ledger,
     hasApi, bump: 0, refresh: () => {}, printSlips: () => {}
   }
 }
@@ -887,7 +902,7 @@ function buildParchiCtx({ payload, snapRows, receiptNo, baseRates, hasApi }) {
 // Group the flat transaction rows by receipt_no (rows arrive ordered by date,
 // receipt_no, id — first-seen order is preserved). `snapshots[rno]` is the
 // getReceiptByNo result for that parchi (may be null for a very old row).
-function groupParchis(rows, snapshots = {}, baseRates = {}, hasApi = false) {
+function groupParchis(rows, snapshots = {}, baseRates = {}, hasApi = false, ledgers = {}) {
   const order = []
   const map = new Map()
   for (const r of rows || []) {
@@ -917,7 +932,7 @@ function groupParchis(rows, snapshots = {}, baseRates = {}, hasApi = false) {
       // وصولی accompanies the lab flow (same as the main screen's LeftReceipts).
       wasooli: !!labInfo
     }
-    const ctx = buildParchiCtx({ payload, snapRows, receiptNo: rno, baseRates, hasApi })
+    const ctx = buildParchiCtx({ payload, snapRows, receiptNo: rno, baseRates, hasApi, ledger: ledgers[rno] })
     return {
       receipt_no: rno,
       date: first.date,
@@ -1045,7 +1060,9 @@ function ParchiBlock({ p, thermal }) {
     <div className="border-2 border-slate-300 rounded-lg bg-white overflow-hidden text-[12px]">
       <div className="flex items-center justify-between gap-2 bg-slate-100 border-b border-slate-200 px-3 py-2" dir="rtl">
         <span className="urdu font-bold text-gray-800 whitespace-nowrap">پرچی نمبر {p.receipt_no}</span>
-        <TypeBadges types={p.types} small={thermal} />
+        {/* ادھار only — this view shows the ادھار رسید, so a نقد / لیب / وصولی
+            badge here would name a receipt that is deliberately not on the page. */}
+        <TypeBadges types={{ udhar: p.types.udhar }} small={thermal} />
         <span className="tabular-nums text-gray-500 whitespace-nowrap" dir="ltr">{isoToDisp(p.date)}</span>
       </div>
       <div className="px-3 py-2 flex flex-col gap-2">
