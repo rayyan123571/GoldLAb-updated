@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react'
-import { GRAMS_PER_TOLA } from '../logic/units'
+import { GRAMS_PER_TOLA, fmtMoney } from '../logic/units'
+import { amountOf, sumAmount } from '../logic/nayaSoda.js'
 
 // نیا سودا report — shared by the بھگتان سودا and بقایا سودا buttons (status
 // prop = 'bhugtan' | 'bakaya'). Reads ONLY the naya_soda table via
@@ -31,6 +32,10 @@ const TD = 'text-[14px] font-bold border border-gray-300 px-2 py-1.5 text-center
 
 // Sum the وزن of a row list; format trims trailing zeros (max 4 dp).
 const sumWazan = (list) => list.reduce((s, r) => s + (Number(r.wazan) || 0), 0)
+// رقم maths (amountOf / sumAmount) live in ../logic/nayaSoda.js so the report and
+// the حساب cash position share ONE definition of what a سودا row is worth.
+// avgRate below is deliberately left untouched: it does its own grams→tola
+// conversion internally and its printed numbers must not move.
 const fmtW = (n) => String(Math.round((Number(n) || 0) * 10000) / 10000)
 // Weight-weighted average per-tola rate. Rate is per-tola, wazan is in grams, so
 // each row's amount = (wazan / GRAMS_PER_TOLA) * rate, and the average rate is
@@ -67,12 +72,14 @@ function applyThermal(on) {
   }
 }
 
-// Compact narrow receipt for the 80mm roll — نام | ریٹ | وزن | قسم | تاریخ.
+// Compact narrow receipt for the 80mm roll — نام | ریٹ | وزن | رقم | قسم | تاریخ.
 function ThermalNaya({ rows, title, range, status }) {
   const TTH = 'border border-black px-1 py-0.5 font-bold urdu'
   const TTD = 'border border-black px-1 py-0.5'
   const buyRows = rows.filter((r) => r.type === 'khareed')
   const sellRows = rows.filter((r) => r.type === 'farokht')
+  const buyAmt = sumAmount(buyRows)
+  const sellAmt = sumAmount(sellRows)
   return (
     <div className="thermal-receipt w-full bg-white text-black leading-tight">
       <div className="text-center border-b border-black pb-1 mb-1">
@@ -88,6 +95,7 @@ function ThermalNaya({ rows, title, range, status }) {
               <th className={`${TTH} text-right`}>نام</th>
               <th className={`${TTH} text-center`}>ریٹ</th>
               <th className={`${TTH} text-center`}>وزن</th>
+              <th className={`${TTH} text-center`}>رقم</th>
               <th className={`${TTH} text-center`}>قسم</th>
               <th className={`${TTH} text-center`}>تاریخ</th>
             </tr>
@@ -98,6 +106,7 @@ function ThermalNaya({ rows, title, range, status }) {
                 <td className={`${TTD} text-right urdu`} dir="rtl">{r.name || '-'}</td>
                 <td className={`${TTD} text-center tabular-nums`} dir="ltr">{r.rate}</td>
                 <td className={`${TTD} text-center tabular-nums`} dir="ltr">{r.wazan}</td>
+                <td className={`${TTD} text-center tabular-nums`} dir="ltr">{fmtMoney(amountOf(r))}</td>
                 <td className={`${TTD} text-center urdu`}>{TYPE_LABEL[r.type] || r.type || '-'}</td>
                 <td className={`${TTD} text-center tabular-nums`} dir="ltr">{isoToDisp(r.date)}</td>
               </tr>
@@ -105,13 +114,41 @@ function ThermalNaya({ rows, title, range, status }) {
           </tbody>
           <tfoot>
             <tr className="font-bold">
-              <td className={`${TTD} urdu`} colSpan={5}>
-                <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-0.5" dir="rtl">
-                  <span>کل وزن: {fmtW(sumWazan(rows))}</span>
-                  <span>خرید: {fmtW(sumWazan(buyRows))}</span>
-                  <span>فروخت: {fmtW(sumWazan(sellRows))}</span>
-                  {status === 'bakaya' && <span>خرید اوسط ریٹ: {fmtRate(avgRate(buyRows))}</span>}
-                  {status === 'bakaya' && <span>فروخت اوسط ریٹ: {fmtRate(avgRate(sellRows))}</span>}
+              {/* 6 data columns on the roll — thermal has no checkbox/ختم column. */}
+              <td className="border border-black p-0 urdu" colSpan={6}>
+                {/* Same matrix as the wide report, sized for the 64mm roll:
+                    خرید/فروخت columns, measures as rows, hairlines via gap-px. */}
+                <div dir="rtl" className="text-black">
+                  <div className="flex items-center justify-between px-1 py-0.5 border-b border-black">
+                    <span className="urdu font-bold">کل وزن</span>
+                    <span className="tabular-nums" dir="ltr">{fmtW(sumWazan(rows))}</span>
+                  </div>
+                  <div className="grid grid-cols-3 gap-px bg-black border-b border-black">
+                    <div className="bg-white px-1 py-0.5" />
+                    <div className="bg-white px-1 py-0.5 urdu font-bold text-center">خرید</div>
+                    <div className="bg-white px-1 py-0.5 urdu font-bold text-center">فروخت</div>
+
+                    <div className="bg-white px-1 py-0.5 urdu">وزن</div>
+                    <div className="bg-white px-1 py-0.5 tabular-nums text-center" dir="ltr">{fmtW(sumWazan(buyRows))}</div>
+                    <div className="bg-white px-1 py-0.5 tabular-nums text-center" dir="ltr">{fmtW(sumWazan(sellRows))}</div>
+
+                    {status === 'bakaya' && (
+                      <>
+                        <div className="bg-white px-1 py-0.5 urdu">اوسط ریٹ</div>
+                        <div className="bg-white px-1 py-0.5 tabular-nums text-center" dir="ltr">{fmtRate(avgRate(buyRows))}</div>
+                        <div className="bg-white px-1 py-0.5 tabular-nums text-center" dir="ltr">{fmtRate(avgRate(sellRows))}</div>
+                        <div className="bg-white px-1 py-0.5 urdu">رقم</div>
+                        <div className="bg-white px-1 py-0.5 tabular-nums text-center" dir="ltr">{fmtMoney(buyAmt)}</div>
+                        <div className="bg-white px-1 py-0.5 tabular-nums text-center" dir="ltr">{fmtMoney(sellAmt)}</div>
+                      </>
+                    )}
+                  </div>
+                  {status === 'bakaya' && sellAmt !== buyAmt && (
+                    <div className="flex items-center justify-between px-1 py-1 font-bold text-[11px]">
+                      <span className="urdu">{sellAmt > buyAmt ? 'اضافی فروخت' : 'اضافی خرید'}</span>
+                      <span className="tabular-nums" dir="ltr">{fmtMoney(Math.abs(sellAmt - buyAmt))}</span>
+                    </div>
+                  )}
                 </div>
               </td>
             </tr>
@@ -149,6 +186,10 @@ export default function NayaSodaReport({ status, from, to, onClose }) {
   const farokhtWazan = sumWazan(sellRows)
   const avgBuyRate = avgRate(buyRows)
   const avgSellRate = avgRate(sellRows)
+  // رقم totals (ریٹ × وزن-in-tolas, summed) over the same displayed rows — the
+  // matrix shows these under بقایا only.
+  const buyAmt = sumAmount(buyRows)
+  const sellAmt = sumAmount(sellRows)
 
   // Select-all state over the CURRENTLY LISTED rows: fully ticked vs. partial
   // (the header checkbox renders indeterminate for the partial case).
@@ -303,6 +344,7 @@ export default function NayaSodaReport({ status, from, to, onClose }) {
                     <th className={TH}>نام</th>
                     <th className={TH}>ریٹ</th>
                     <th className={TH}>وزن</th>
+                    <th className={TH}>رقم</th>
                     <th className={TH}>قسم</th>
                     <th className={TH}>تاریخ</th>
                     {showDeleteBtn && <th className={`${TH} no-print`}>&nbsp;</th>}
@@ -326,6 +368,7 @@ export default function NayaSodaReport({ status, from, to, onClose }) {
                       <td className={`${TD} urdu text-right`}>{r.name || '-'}</td>
                       <td className={TD} dir="ltr">{r.rate}</td>
                       <td className={TD} dir="ltr">{r.wazan}</td>
+                      <td className={TD} dir="ltr">{fmtMoney(amountOf(r))}</td>
                       <td className={`${TD} urdu`}>{TYPE_LABEL[r.type] || r.type || '-'}</td>
                       <td className={TD} dir="ltr">{isoToDisp(r.date)}</td>
                       {showDeleteBtn && (
@@ -345,13 +388,51 @@ export default function NayaSodaReport({ status, from, to, onClose }) {
                 </tbody>
                 <tfoot>
                   <tr className="bg-amber-50 border-t-2 border-amber-300 font-bold urdu text-[13px] text-amber-800">
-                    <td colSpan={(showMoveCheckbox ? 1 : 0) + 5 + (showDeleteBtn ? 1 : 0)} className="px-3 py-2.5">
-                      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1" dir="rtl">
-                        <span>کل وزن: <span className="tabular-nums" dir="ltr">{fmtW(totalWazan)}</span></span>
-                        <span>خرید وزن: <span className="tabular-nums" dir="ltr">{fmtW(khareedWazan)}</span></span>
-                        <span>فروخت وزن: <span className="tabular-nums" dir="ltr">{fmtW(farokhtWazan)}</span></span>
-                        {status === 'bakaya' && <span>خرید اوسط ریٹ: <span className="tabular-nums" dir="ltr">{fmtRate(avgBuyRate)}</span></span>}
-                        {status === 'bakaya' && <span>فروخت اوسط ریٹ: <span className="tabular-nums" dir="ltr">{fmtRate(avgSellRate)}</span></span>}
+                    {/* 6 data columns (نام ریٹ وزن رقم قسم تاریخ) + بقایا's leading
+                        checkbox + بھگتان's trailing ختم — the two are never both on,
+                        but the span is computed from the same flags that render them. */}
+                    <td colSpan={(showMoveCheckbox ? 1 : 0) + 6 + (showDeleteBtn ? 1 : 0)} className="p-0">
+                      {/* Financial summary a shopkeeper scans. Structure follows the
+                          real axis of the data — خرید vs فروخت as columns, measures
+                          as rows — in fixed grid tracks so every digit lines up under
+                          the one above it. All emphasis is spent on اضافی. */}
+                      <div dir="rtl" className="text-amber-800">
+                        {/* کل وزن — quiet, full width */}
+                        <div className="flex items-center justify-between px-3 py-1.5 border-b border-amber-300">
+                          <span className="urdu font-semibold">کل وزن</span>
+                          <span className="tabular-nums font-bold" dir="ltr">{fmtW(totalWazan)}</span>
+                        </div>
+                        {/* خرید / فروخت matrix — hairline separators via gap-px over
+                            the darker amber, cells on the lighter one. */}
+                        <div className="grid grid-cols-3 gap-px bg-amber-300 border-b border-amber-300">
+                          <div className="bg-amber-50 px-3 py-1.5" />
+                          <div className="bg-amber-50 px-3 py-1.5 urdu font-bold text-center">خرید</div>
+                          <div className="bg-amber-50 px-3 py-1.5 urdu font-bold text-center">فروخت</div>
+
+                          <div className="bg-amber-50 px-3 py-1.5 urdu font-semibold">وزن</div>
+                          <div className="bg-amber-50 px-3 py-1.5 tabular-nums text-center" dir="ltr">{fmtW(khareedWazan)}</div>
+                          <div className="bg-amber-50 px-3 py-1.5 tabular-nums text-center" dir="ltr">{fmtW(farokhtWazan)}</div>
+
+                          {status === 'bakaya' && (
+                            <>
+                              <div className="bg-amber-50 px-3 py-1.5 urdu font-semibold">اوسط ریٹ</div>
+                              <div className="bg-amber-50 px-3 py-1.5 tabular-nums text-center" dir="ltr">{fmtRate(avgBuyRate)}</div>
+                              <div className="bg-amber-50 px-3 py-1.5 tabular-nums text-center" dir="ltr">{fmtRate(avgSellRate)}</div>
+                              <div className="bg-amber-50 px-3 py-1.5 urdu font-semibold">رقم</div>
+                              <div className="bg-amber-50 px-3 py-1.5 tabular-nums text-center" dir="ltr">{fmtMoney(buyAmt)}</div>
+                              <div className="bg-amber-50 px-3 py-1.5 tabular-nums text-center" dir="ltr">{fmtMoney(sellAmt)}</div>
+                            </>
+                          )}
+                        </div>
+                        {/* اضافی — the single loud element; بقایا only, and only when
+                            the two sides differ (equal ⇒ no excess ⇒ no band). The
+                            value is always positive; the label carries the direction. */}
+                        {status === 'bakaya' && sellAmt !== buyAmt && (
+                          <div className="flex items-center justify-between px-3 py-2 bg-amber-100">
+                            <span className="urdu font-bold text-[15px]">{sellAmt > buyAmt ? 'اضافی فروخت' : 'اضافی خرید'}</span>
+                            <span className="tabular-nums font-bold text-[17px]" dir="ltr">{fmtMoney(Math.abs(sellAmt - buyAmt))}</span>
+                          </div>
+                        )}
                       </div>
                     </td>
                   </tr>
