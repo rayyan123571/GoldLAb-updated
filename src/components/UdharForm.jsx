@@ -336,6 +336,19 @@ export default function UdharForm({ open, onClose }) {
     setCustName(c ? c.name : '')
   }
 
+  // نام typed (or picked from the datalist). Resolve it to a customer CODE only
+  // when exactly ONE saved customer carries that name — then the report filters on
+  // that id, which is exact. Two customers can share a name, and the list shows
+  // them as identical entries, so adopting the first id would quietly report the
+  // wrong person's ledger; leaving the code empty keeps it a name search and both
+  // appear. A partial name stays a search too — that is the point of typing.
+  const onTypeCustomerName = (v) => {
+    setCustName(v)
+    const t = v.trim().toLowerCase()
+    const exact = t ? customers.filter((c) => String(c.name || '').trim().toLowerCase() === t) : []
+    setCustCode(exact.length === 1 ? String(exact[0].id) : '')
+  }
+
   // ── The ORIGINAL 8 buttons in a 2×4 grid (DOM order = RTL right col then left).
   // Buttons 1–4 = GROUP1 (no-date balance reports), 5–8 = GROUP2 (same-day). Their
   // array order already yields the requested rows:
@@ -407,10 +420,21 @@ export default function UdharForm({ open, onClose }) {
                 </label>
                 <label className="flex items-center gap-2">
                   <span className="urdu text-[14px] font-bold text-black w-[120px] shrink-0">کسٹمر کا نام :</span>
-                  <select className="flex-1 min-w-0 border border-gray-400 bg-white text-[15px] font-bold px-2 py-1.5 rounded-sm focus:outline-none focus:ring-1 focus:ring-blue-500" value={custCode} onChange={onPickCustomer}>
-                    <option value="">—</option>
-                    {customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-                  </select>
+                  {/* Type to search, or pick from the list — the datalist keeps every
+                      saved customer one click away while still allowing a partial
+                      name. Enter runs the same report as the تفصیلی رسید button, so a
+                      name can be looked up without reaching for the mouse. */}
+                  <input
+                    list="udhar-customer-names"
+                    value={custName}
+                    onChange={(e) => onTypeCustomerName(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); loadReport({ type: 'g3' }) } }}
+                    placeholder="نام لکھیں یا فہرست سے چنیں"
+                    className="urdu flex-1 min-w-0 border border-gray-400 bg-white text-[15px] font-bold px-2 py-1.5 rounded-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
+                  />
+                  <datalist id="udhar-customer-names">
+                    {customers.map((c) => <option key={c.id} value={c.name} />)}
+                  </datalist>
                 </label>
                 <button
                   type="button"
