@@ -348,6 +348,18 @@ const RECEIPT_NOS_SQL = `
   UNION
   SELECT receipt_no AS rn FROM receipts WHERE receipt_no IS NOT NULL`
 
+// The LIKE pattern for a report's کسٹمر کا نام filter. Anchored to the START of
+// the name: an unanchored '%s%' matched a name that merely CARRIED the text
+// anywhere, so filtering for "shop" while only "s" was typed also reported
+// "Nasir". A prefix is what the نام box's ghost completion offers, so the report
+// now returns the customer the box is pointing at. An exact name never reaches
+// here — UdharForm resolves that to a code and the query filters on the id.
+// LIKE's own wildcards are escaped so a name containing % or _ matches literally.
+function namePrefixLike(name) {
+  return `${String(name).trim().replace(/[\\%_]/g, '\\$&')}%`
+}
+const NAME_PREFIX_SQL = "c.name LIKE ? ESCAPE '\\'"
+
 const api = {
   getRates() {
     const r = query('SELECT * FROM settings WHERE id = 1')
@@ -655,7 +667,7 @@ const api = {
     const where = []
     const params = []
     if (customerId != null && customerId !== '') { where.push('t.customer_id = ?'); params.push(customerId) }
-    else if (name && String(name).trim()) { where.push('c.name LIKE ?'); params.push(`%${String(name).trim()}%`) }
+    else if (name && String(name).trim()) { where.push(NAME_PREFIX_SQL); params.push(namePrefixLike(name)) }
     if (from) { where.push('t.date >= ?'); params.push(from) }
     if (to) { where.push('t.date <= ?'); params.push(to) }
     if (category) { where.push('t.category = ?'); params.push(category) }
@@ -705,7 +717,7 @@ const api = {
     const where = ['t.category = ?']
     const params = [category]
     if (customerId != null && customerId !== '') { where.push('t.customer_id = ?'); params.push(customerId) }
-    else if (name && String(name).trim()) { where.push('c.name LIKE ?'); params.push(`%${String(name).trim()}%`) }
+    else if (name && String(name).trim()) { where.push(NAME_PREFIX_SQL); params.push(namePrefixLike(name)) }
     const rows = query(
       `SELECT t.customer_id, c.name AS customer_name,
               SUM(COALESCE(t.khalis_sona, 0)) AS total_khalis,
@@ -744,7 +756,7 @@ const api = {
     const where = [`t.category IN ('${cats[0]}','${cats[1]}')`]
     const params = []
     if (customerId != null && customerId !== '') { where.push('t.customer_id = ?'); params.push(customerId) }
-    else if (name && String(name).trim()) { where.push('c.name LIKE ?'); params.push(`%${String(name).trim()}%`) }
+    else if (name && String(name).trim()) { where.push(NAME_PREFIX_SQL); params.push(namePrefixLike(name)) }
     const raw = query(
       `SELECT t.customer_id, c.name AS customer_name,
               SUM((CASE WHEN t.direction = 'out' THEN 1 ELSE -1 END) * COALESCE(t.${col}, 0)) AS net,
@@ -894,7 +906,7 @@ const api = {
     const where = ["t.category = 'kacha_gold_take'"]
     const params = []
     if (customerId != null && customerId !== '') { where.push('t.customer_id = ?'); params.push(customerId) }
-    else if (name && String(name).trim()) { where.push('c.name LIKE ?'); params.push(`%${String(name).trim()}%`) }
+    else if (name && String(name).trim()) { where.push(NAME_PREFIX_SQL); params.push(namePrefixLike(name)) }
     if (from) { where.push('t.date >= ?'); params.push(from) }
     if (to) { where.push('t.date <= ?'); params.push(to) }
     const rows = query(

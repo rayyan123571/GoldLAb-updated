@@ -16,3 +16,5 @@ export const amountOf = (r) => (Number(r.rate) || 0) * tolaOf(r)
 export const sumAmount = (list) => list.reduce((s, r) => s + amountOf(r), 0)
 // Σ tolas over a row list.
 export const sumTola = (list) => list.reduce((s, r) => s + tolaOf(r), 0)
+// Σ وزن (grams) over a row list — the metal side of what a سودا row is worth.
+export const sumWazan = (list) => list.reduce((s, r) => s + (Number(r.wazan) || 0), 0)
