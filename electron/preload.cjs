@@ -6,6 +6,11 @@ const call = (fn, ...args) => ipcRenderer.invoke('db', { fn, args })
 contextBridge.exposeInMainWorld('api', {
   getRates: () => call('getRates'),
   saveRates: (r) => call('saveRates', r),
+  // ٹوٹل panel pin gate. The raw pin crosses only on these three calls and is
+  // hashed in the main process (see electron/pinGate.cjs) — never stored plain.
+  pinStatus: () => call('pinStatus'),
+  pinCheck: (code) => call('pinCheck', code),
+  pinSet: (newPin, auth) => call('pinSet', newPin, auth),
   receiptNoExists: (n) => call('receiptNoExists', n),
   listDrafts: () => call('listDrafts'),
   upsertDraft: (seq, d) => call('upsertDraft', seq, d),
@@ -55,6 +60,10 @@ contextBridge.exposeInMainWorld('api', {
   saveNayaSodaDraft: (receiptNo, form) => call('saveNayaSodaDraft', receiptNo, form),
   clearNayaSodaDraft: (receiptNo) => call('clearNayaSodaDraft', receiptNo),
   exportPDF: (defaultName, opts) => ipcRenderer.invoke('export-pdf', { defaultName, ...(opts || {}) }),
+  // Auto report-PDF export to the synced (Google Drive) folder after a transaction.
+  generateReportPdfs: (payload) => ipcRenderer.invoke('generate-report-pdfs', payload || {}),
+  // Folder picker for the reports-folder setting (ڈیفالٹ سیٹنگز).
+  pickFolder: () => ipcRenderer.invoke('pick-folder'),
   saveReceipt: (r) => call('saveReceipt', r),
   replaceReceipt: (arg) => call('replaceReceipt', arg),
   freeReceipt: (n) => call('freeReceipt', n),

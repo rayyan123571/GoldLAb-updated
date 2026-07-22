@@ -9,6 +9,8 @@
 const path = require('path')
 const fs = require('fs')
 const initSqlJs = require('sql.js')
+// ٹوٹل-panel pin gate: hashing + the developer recovery code (see pinGate.cjs).
+const pinGate = require('./pinGate.cjs')
 const { SHOP_FIELDS, SHOP_DEFAULTS, SLIP_TERMS_DEFAULT, SLIP_TEXT_FIELDS, SLIP_TEXT_DEFAULTS } = require('./shopDefaults.cjs')
 
 let SQL = null
@@ -255,6 +257,22 @@ function migrateSchema() {
     try { db.run('ALTER TABLE transactions ADD COLUMN updated_at TEXT') } catch (e) { /* already exists */ }
   }
 
+  // settings.reports_dir — the synced (Google Drive Desktop) folder where per-
+  // report PDFs are auto-exported. Blank/absent = the feature is OFF. Never
+  // hardcoded; the user picks it once in ڈیفالٹ سیٹنگز (see electron/reportPdf.cjs).
+  if (!sCols.includes('reports_dir')) db.run('ALTER TABLE settings ADD COLUMN reports_dir TEXT')
+
+  // settings.pin_hash / pin_salt — the ٹوٹل panel's owner pin, stored ONLY as a
+  // salted PBKDF2-SHA256 digest (never the raw pin). Both NULL = no pin set yet,
+  // which is what makes the login screen offer "create a pin" on first use.
+  // Written exclusively by pinSet(); read exclusively by pinStatus()/pinCheck().
+  if (!sCols.includes('pin_hash')) {
+    try { db.run('ALTER TABLE settings ADD COLUMN pin_hash TEXT') } catch (e) { /* already exists */ }
+  }
+  if (!sCols.includes('pin_salt')) {
+    try { db.run('ALTER TABLE settings ADD COLUMN pin_salt TEXT') } catch (e) { /* already exists */ }
+  }
+
   // naya_soda.receipt_no — tag saved deals with the parchi they were entered on.
   // Patch DBs created before the نیا سودا ↔ receipt linkage existed. The draft
   // table itself is created by SCHEMA (CREATE TABLE IF NOT EXISTS), no migration.
@@ -361,9 +379,56 @@ function namePrefixLike(name) {
 const NAME_PREFIX_SQL = "c.name LIKE ? ESCAPE '\\'"
 
 const api = {
+  // ── ٹوٹل PANEL PIN GATE ─────────────────────────────────────────────────────
+  // Reads/writes settings.pin_hash + settings.pin_salt and NOTHING else. The raw
+  // pin arrives only as an argument, is hashed by pinGate.cjs, and is never
+  // stored or logged. The developer recovery code lives at the top of pinGate.cjs.
+
+  // Has the owner set a pin yet? Drives create-vs-enter on the login screen.
+  pinStatus() {
+    const r = query('SELECT pin_hash, pin_salt FROM settings WHERE id = 1')
+    const row = r[0] || {}
+    return { hasPin: !!(row.pin_hash && row.pin_salt) }
+  },
+
+  // Verify a typed code. `ok` = it matches the owner's stored pin; `recovery` =
+  // it is the developer recovery code (which is accepted anywhere the pin is,
+  // and is what lets a forgotten pin be reset).
+  pinCheck(code) {
+    const raw = String(code == null ? '' : code)
+    if (pinGate.isRecoveryCode(raw)) return { ok: true, recovery: true }
+    const r = query('SELECT pin_hash, pin_salt FROM settings WHERE id = 1')
+    const row = r[0] || {}
+    if (!row.pin_hash || !row.pin_salt) return { ok: false, recovery: false }
+    const ok = pinGate.safeEqual(pinGate.hashPin(raw, row.pin_salt), row.pin_hash)
+    return { ok, recovery: false }
+  },
+
+  // Set (or change) the pin. When one already exists, `auth` must be the current
+  // pin or the recovery code — so a change can never happen unauthenticated. A
+  // FRESH salt is generated every time. flush() writes through immediately, so a
+  // pin set now still applies after a restart.
+  pinSet(newPin, auth) {
+    if (!pinGate.isValidPin(newPin)) return { ok: false, error: 'invalid' }
+    if (api.pinStatus().hasPin) {
+      const chk = api.pinCheck(auth)
+      if (!chk.ok) return { ok: false, error: 'auth' }
+    }
+    const salt = pinGate.makeSalt()
+    run('UPDATE settings SET pin_hash = ?, pin_salt = ? WHERE id = 1',
+      [pinGate.hashPin(newPin, salt), salt])
+    flush() // persist immediately — a new pin must survive an instant restart
+    return { ok: true }
+  },
+
   getRates() {
     const r = query('SELECT * FROM settings WHERE id = 1')
-    return r[0] || null
+    if (!r[0]) return null
+    // The pin digest/salt live in this same row but are NOT settings — strip them
+    // so the ٹوٹل pin never travels to the renderer. Nothing else is altered:
+    // every rate/print/shop field is returned exactly as before.
+    const { pin_hash, pin_salt, ...rates } = r[0]
+    return rates
   },
 
   saveRates(rates) {
@@ -374,6 +439,7 @@ const api = {
     run(
       `UPDATE settings SET date=?, rate_tezabi_tola=?, parchi_charges=?, fc_per_gram=?, rate_tezabi_gram=?, point=?, slip_count=?,
               raw_print_mode=COALESCE(?, raw_print_mode), print_scale=COALESCE(?, print_scale),
+              reports_dir=COALESCE(?, reports_dir),
               ${SLIP_TEXT_FIELDS.map((f) => `${f}=COALESCE(?, ${f})`).join(', ')} WHERE id=1`,
       [
         rates.date,
@@ -385,6 +451,9 @@ const api = {
         rates.slip_count != null ? rates.slip_count : 1,
         rates.raw_print_mode != null ? rates.raw_print_mode : null,
         rates.print_scale != null ? Number(rates.print_scale) : null,
+        // reports_dir: an EMPTY STRING is not null, so deliberately clearing the
+        // folder DOES save (feature off); omitting it keeps the stored path.
+        rates.reports_dir != null ? String(rates.reports_dir) : null,
         ...SLIP_TEXT_FIELDS.map((f) => (rates[f] != null ? String(rates[f]) : null))
       ]
     )

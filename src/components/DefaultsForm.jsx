@@ -48,15 +48,18 @@ function Row({ label, children, alignTop }) {
 // ڈیفالٹ سیٹنگز — rate / charges / parchi / slip-print settings, saved to the
 // settings table via the store's saveRates (which also refreshes the live UI).
 export default function DefaultsForm({ open, onClose }) {
-  const { rates, saveRates, hasApi } = useApp()
+  const { rates, saveRates, hasApi, exportReportsToDrive } = useApp()
   const [form, setForm] = useState({
     rate_tezabi_tola: '', fc_per_gram: '', parchi_charges: '', slip_count: '1', raw_print_mode: 'auto', print_scale: 1.15,
     shop_name: '', shop_tagline: '', shop_owner: '', shop_phone1: '', shop_phone2: '', shop_phone3: '', shop_address: '',
-    slip_terms: ''
+    slip_terms: '',
+    // Synced (Google Drive Desktop) reports folder — blank = auto-export OFF.
+    reports_dir: ''
   })
   const [saved, setSaved] = useState(false)
   const [testMsg, setTestMsg] = useState('')
   const [testBusy, setTestBusy] = useState(false)
+  const [reportMsg, setReportMsg] = useState('') // reports-folder test status
   const savedTimer = useRef(null)
   const saveTimer = useRef(null)
   const previewRef = useRef(null)
@@ -80,7 +83,8 @@ export default function DefaultsForm({ open, onClose }) {
         raw_print_mode: src.raw_print_mode === 'force' ? 'force' : 'auto',
         print_scale: src.print_scale != null ? Number(src.print_scale) : 1.15,
         ...shop,
-        slip_terms: src.slip_terms != null ? String(src.slip_terms) : ''
+        slip_terms: src.slip_terms != null ? String(src.slip_terms) : '',
+        reports_dir: src.reports_dir != null ? String(src.reports_dir) : ''
       })
     }
     if (hasApi) window.api.getRates().then(seed)
@@ -136,7 +140,10 @@ export default function DefaultsForm({ open, onClose }) {
       raw_print_mode: next.raw_print_mode === 'force' ? 'force' : 'auto',
       print_scale: Number(next.print_scale) || 1.15,
       ...shop,
-      slip_terms: String(next.slip_terms ?? '').trim()
+      slip_terms: String(next.slip_terms ?? '').trim(),
+      // Synced reports folder ('' → auto-export off). Trimmed so a stray space
+      // never turns the feature on with an unusable path.
+      reports_dir: String(next.reports_dir ?? '').trim()
     })
     setSaved(true)
     if (savedTimer.current) clearTimeout(savedTimer.current)
@@ -281,6 +288,68 @@ export default function DefaultsForm({ open, onClose }) {
               ))}
             </select>
           </Row>
+
+          {/* ── رپورٹس فولڈر (Google Drive) — the synced folder auto-export writes
+              each report's PDF into. BLANK = feature OFF (nothing is written, nothing
+              deleted). Picked once here; the export then runs on app-open and after
+              every transaction. Never touches the database. */}
+          <div className="mt-1 pt-4 border-t border-gray-200 flex flex-col gap-3">
+            <div className="urdu font-bold text-[14px] text-gray-800">رپورٹس فولڈر (گوگل ڈرائیو)</div>
+            <div className="urdu text-[11px] text-gray-500 leading-5">
+              گوگل ڈرائیو ڈیسک ٹاپ کا وہ فولڈر منتخب کریں جہاں رپورٹس کی PDF خودکار محفوظ ہوں۔
+              خالی چھوڑ دیں تو یہ سہولت بند رہے گی۔
+            </div>
+            <Row label="فولڈر کا راستہ">
+              <div className="flex items-center gap-2 w-full">
+                <input
+                  dir="ltr"
+                  className={`${INPUT} flex-1`}
+                  value={form.reports_dir}
+                  onChange={(e) => commit({ ...form, reports_dir: e.target.value })}
+                  placeholder="G:\\My Drive\\GoldLab Reports"
+                />
+                <button
+                  type="button"
+                  className="px-3 py-1.5 rounded-md bg-gray-100 hover:bg-gray-200 border border-gray-300 urdu text-[12px] whitespace-nowrap"
+                  onClick={async () => {
+                    if (!hasApi || !window.api.pickFolder) return
+                    try {
+                      const r = await window.api.pickFolder()
+                      if (r && r.ok && r.path) commit({ ...form, reports_dir: r.path })
+                    } catch { /* cancelled — leave the path as-is */ }
+                  }}
+                >
+                  فولڈر منتخب کریں…
+                </button>
+              </div>
+            </Row>
+            <div className="flex items-center gap-2 flex-wrap">
+              <button
+                type="button"
+                disabled={!form.reports_dir}
+                className="px-3 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed text-white urdu text-[12px]"
+                onClick={async () => {
+                  setReportMsg('')
+                  if (!exportReportsToDrive) return
+                  try { await exportReportsToDrive(); setReportMsg('رپورٹس فولڈر میں بھیج دی گئیں ✓') }
+                  catch { setReportMsg('رپورٹس بھیجنے میں مسئلہ ہوا') }
+                  setTimeout(() => setReportMsg(''), 3000)
+                }}
+              >
+                ابھی رپورٹس بھیجیں (ٹیسٹ)
+              </button>
+              {form.reports_dir && (
+                <button
+                  type="button"
+                  className="px-3 py-1.5 rounded-md bg-gray-100 hover:bg-gray-200 border border-gray-300 urdu text-[12px]"
+                  onClick={() => commit({ ...form, reports_dir: '' })}
+                >
+                  ہٹا دیں
+                </button>
+              )}
+              {reportMsg && <span className="urdu text-[12px] text-gray-600">{reportMsg}</span>}
+            </div>
+          </div>
 
           {/* ── پرچی ہیڈر — the shop identity printed at the top of every slip.
               Each field is capped (SHOP_MAX) so a long line can never overflow

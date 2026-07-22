@@ -6,6 +6,7 @@ const db = require('./db.cjs')
 const backup = require('./backup.cjs')
 const raster = require('./rasterPrint.cjs')
 const liveGold = require('./liveGold.cjs')
+const reportPdf = require('./reportPdf.cjs')
 const trial = require('./trial/trialManager.cjs')
 const trialGate = require('./trial/gateWindow.cjs')
 const license = require('./license/licenseManager.cjs')
@@ -392,6 +393,34 @@ ipcMain.handle('open-whatsapp', (_evt, { mobile, text } = {}) => {
       : 'https://web.whatsapp.com/'
     openWhatsAppWindow(url)
     return { ok: true, mode: 'web', num, url }
+  } catch (e) {
+    return { ok: false, reason: String(e && e.message ? e.message : e) }
+  }
+})
+
+// ── Auto report-PDF export (see electron/reportPdf.cjs) ─────────────────────
+// The renderer sends REPORTS_DIR + the reports' HTML after a transaction; we
+// delete each report's old PDF(s) and write a fresh, uniquely-named one. dbDir is
+// the folder holding goldlab.sqlite (app.getPath('userData')) — reportPdf's safety
+// assert REFUSES to run if reportsDir is equal to / inside / a parent of it, so
+// this feature can never touch the database. Any failure is swallowed (returns a
+// reason) — an export must NEVER block or crash a save. Never touches licensing.
+ipcMain.handle('generate-report-pdfs', async (_evt, { reportsDir, reports, staleKeys } = {}) => {
+  try {
+    const dbDir = app.getPath('userData')
+    return await reportPdf.generateReportPdfs({ reportsDir, dbDir, reports, staleKeys })
+  } catch (e) {
+    return { ok: false, reason: String(e && e.message ? e.message : e) }
+  }
+})
+
+// Folder picker for the ڈیفالٹ سیٹنگز reports-folder field (choose the Google
+// Drive Desktop synced folder). Returns { ok, path } or { ok:false } on cancel.
+ipcMain.handle('pick-folder', async () => {
+  try {
+    const r = await dialog.showOpenDialog(win, { properties: ['openDirectory', 'createDirectory'] })
+    if (r.canceled || !r.filePaths || !r.filePaths.length) return { ok: false }
+    return { ok: true, path: r.filePaths[0] }
   } catch (e) {
     return { ok: false, reason: String(e && e.message ? e.message : e) }
   }

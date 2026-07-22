@@ -31,7 +31,7 @@ const INP = `${INP_BASE} text-left`
 const NAME_INP = `${INP_BASE} urdu`
 
 export default function NayaSoda() {
-  const { receiptNo } = useApp() // current parchi number
+  const { receiptNo, scheduleReportsExport } = useApp() // current parchi number
   const [name, setName] = useState('')
   const [rate, setRate] = useState('')
   const [wazan, setWazan] = useState('')
@@ -103,6 +103,9 @@ export default function NayaSoda() {
       // This parchi's in-progress draft is now committed — drop it, then blank the
       // form for the next entry (date resets to today, قسم to خرید).
       if (window.api.clearNayaSodaDraft && receiptNo != null) await window.api.clearNayaSodaDraft(receiptNo)
+      // نیا سودا writes bypass the store, so trigger the Drive report export here
+      // (the بھگتان/بقایا PDFs must refresh too). Debounced + guarded; no-op if off.
+      try { scheduleReportsExport && scheduleReportsExport() } catch {}
       setName(''); setRate(''); setWazan(''); setType('khareed'); setDate(todayISO())
       showMsg({ ok: true, text: 'محفوظ ہو گیا ✓' })
     } catch (e) {

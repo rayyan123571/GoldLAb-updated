@@ -2,6 +2,15 @@ import React, { createContext, useContext, useEffect, useState, useCallback, use
 import { computeTable } from '../logic/purity.js'
 import { GRAMS_PER_TOLA, GRAMS_PER_RATTI, round } from '../logic/units.js'
 import { buildSlipHeader, buildSlipTerms, shopOf, SLIP_DESIGN_W } from '../logic/slipHeader.js'
+import {
+  serializeAppCss, buildDaybookReportHtml,
+  buildGoldBalanceHtml, buildCashBalanceHtml, buildGoldEntriesHtml, buildCashEntriesHtml,
+  buildNaqadEntriesHtml, buildKachaHtml, buildSaudaHtml, buildExpensesHtml
+} from '../logic/reportHtml.js'
+
+// Auto report-PDF export debounce: several commits in quick succession export
+// once, ~1.5s after the last (see exportReportsToDrive / scheduleReportsExport).
+const REPORTS_DEBOUNCE_MS = 1500
 
 // Pure-gold (khalis) + qeemat from a {wazan, point, rate} gold entry — the SAME
 // ratti-scale formula the نقد/ادھار panel's GoldRow uses, so a saved transaction
@@ -350,8 +359,125 @@ export function AppProvider({ children }) {
   const draftTimerRef = useRef(null)       // auto-save debounce handle
   const formSnapshotRef = useRef(null)     // { hasData, snap } latest composing form
   const persistInflightRef = useRef(Promise.resolve()) // serialize draft writes
+  const reportsTimerRef = useRef(null)     // debounce handle for the Drive report export
+  const reportsExportRef = useRef(null)    // latest scheduleReportsExport (called from commit points)
+  const reportsBusyRef = useRef(false)     // an export is mid-flight → never stack another
 
   const refresh = useCallback(() => setBump((b) => b + 1), [])
+
+  // ── Auto report-PDF export to the synced (Google Drive) folder ──────────────
+  // After a transaction, regenerate ONE report per main-screen ACTION BUTTON into
+  // settings.reports_dir so a remote client always sees the latest. Each report is
+  // the FULL, all-time, unfiltered record set for that button's transaction type,
+  // EXCEPT the four آج reports (today-only, same date basis as روزنامچہ/getDaybook)
+  // plus روزنامچہ itself. Best-effort: any failure is swallowed here and in main —
+  // it can NEVER block a save or crash, and NEVER touches the DB (electron/reportPdf.cjs).
+  const exportReportsToDrive = useCallback(async () => {
+    // If a prior export is still running (e.g. the load export overlapping a fast
+    // first commit), skip this round rather than stacking two batches that would
+    // delete each other's freshly-written files.
+    if (reportsBusyRef.current) return
+    reportsBusyRef.current = true
+    try {
+      const dir = rates && rates.reports_dir
+      if (!dir || !hasApi || !window.api.generateReportPdfs) return
+      const css = serializeAppCss()
+      // "today" = the app's working local date (rates.date, forced to todayISO() on
+      // load) — the SAME basis روزنامچہ/getDaybook uses, so "today" is consistent
+      // app-wide. todaySub shows it as DD/MM/YYYY (matching the reports' isoToDisp).
+      const today = (rates && rates.date) || todayISO()
+      const todaySub = 'آج · ' + String(today).split('-').reverse().join('/')
+      const reports = []
+      const g = async (fn) => { try { return await fn() } catch { return null } }
+      // `label` becomes the VISIBLE Urdu filename ("<label>__<YYYY-MM-DD_HH-mm-ss>.pdf")
+      // so the operator reads the folder in Urdu; reportKey stays the internal id used
+      // for the safe delete filter. Main sanitizes the label (see safeFileLabel).
+      const push = (reportKey, label, html, landscape) => {
+        if (html) reports.push({ reportKey, label, html, pageSize: 'A4', landscape: !!landscape })
+      }
+
+      // 1–4 · لینا/دینا ہے → net balance per customer (all-time).
+      const gl = await g(() => window.api.reportGoldBalanceNet('lena', {}))
+      if (gl) push('tezabi_lena_hai', 'تیزابی لینا ہے', buildGoldBalanceHtml({ rows: gl.rows || [], title: 'تیزابی لینا ہے (بیلنس)', css }))
+      const gd = await g(() => window.api.reportGoldBalanceNet('dena', {}))
+      if (gd) push('tezabi_dena_hai', 'تیزابی دینا ہے', buildGoldBalanceHtml({ rows: gd.rows || [], title: 'تیزابی دینا ہے (بیلنس)', css }))
+      const cl = await g(() => window.api.reportCashBalanceNet('lena', {}))
+      if (cl) push('raqam_leni_hai', 'رقم لینی ہے', buildCashBalanceHtml({ rows: cl.rows || [], title: 'رقم لینی ہے (بیلنس)', css }))
+      const cd = await g(() => window.api.reportCashBalanceNet('dena', {}))
+      if (cd) push('raqam_deni_hai', 'رقم دینی ہے', buildCashBalanceHtml({ rows: cd.rows || [], title: 'رقم دینی ہے (بیلنس)', css }))
+
+      // 5–8 · آج کا/کی ادھار → TODAY-ONLY entry list of that credit category (date ==
+      // today's local date, the SAME basis روزنامچہ/getDaybook uses = rates.date). An
+      // empty day still produces the file (with "آج کوئی اندراج نہیں") so a stale
+      // old-day PDF never lingers. from == to == today → getReport gives t.date = today.
+      const cg = await g(() => window.api.getReport({ category: 'cash_give', from: today, to: today }))
+      if (cg) push('udhaar_raqam_di', 'آج کی ادھار رقم دی', buildCashEntriesHtml({ rows: cg.rows || [], title: 'آج کی ادھار رقم دی', subtitle: todaySub, emptyText: 'آج کوئی اندراج نہیں', css }))
+      const ct = await g(() => window.api.getReport({ category: 'cash_take', from: today, to: today }))
+      if (ct) push('udhaar_raqam_aamad', 'آج کی ادھار رقم آمد', buildCashEntriesHtml({ rows: ct.rows || [], title: 'آج کی ادھار رقم آمد', subtitle: todaySub, emptyText: 'آج کوئی اندراج نہیں', css }))
+      const gg = await g(() => window.api.getReport({ category: 'gold_give', from: today, to: today }))
+      if (gg) push('tezabi_udhaar_diya', 'آج کا تیزابی ادھار دیا', buildGoldEntriesHtml({ rows: gg.rows || [], title: 'آج کا تیزابی ادھار دیا', subtitle: todaySub, emptyText: 'آج کوئی اندراج نہیں', css }))
+      const gt = await g(() => window.api.getReport({ category: 'gold_take', from: today, to: today }))
+      if (gt) push('tezabi_udhaar_liya', 'آج کا تیزابی ادھار لیا', buildGoldEntriesHtml({ rows: gt.rows || [], title: 'آج کا تیزابی ادھار لیا', subtitle: todaySub, emptyText: 'آج کوئی اندراج نہیں', css }))
+
+      // 9–10 · نقد فروخت / نقد خرید → all naqad entries (all-time).
+      const sell = await g(() => window.api.getReport({ category: 'gold_sell' }))
+      if (sell) push('naqad_farokht', 'نقد فروخت', buildNaqadEntriesHtml({ rows: sell.rows || [], title: 'نقد فروخت — تمام اندراج', css }))
+      const buy = await g(() => window.api.getReport({ category: 'gold_buy' }))
+      if (buy) push('naqad_khareed', 'نقد خرید', buildNaqadEntriesHtml({ rows: buy.rows || [], title: 'نقد خرید — تمام اندراج', css }))
+
+      // 11 · کچا سونا لیا → all kacha entries (all-time).
+      const kacha = await g(() => window.api.reportKachaGold({}))
+      if (kacha) push('kacha_sona_liya', 'کچا سونا لیا', buildKachaHtml({ rows: kacha.rows || [], title: 'کچا سونا لیا — تمام اندراج', css }))
+
+      // 12–13 · نیا سودا deals → settled (بھگتان) + outstanding (بقایا), all-time.
+      // listNayaSoda returns a BARE array, already newest-first (id DESC).
+      const bhugtan = await g(() => window.api.listNayaSoda('bhugtan'))
+      if (bhugtan) push('bhugtan_sauda', 'بھگتان سودا', buildSaudaHtml({ rows: bhugtan || [], title: 'بھگتان سودا — تمام اندراج', css }))
+      const baqaya = await g(() => window.api.listNayaSoda('bakaya'))
+      if (baqaya) push('baqaya_sauda', 'بقایا سودا', buildSaudaHtml({ rows: baqaya || [], title: 'بقایا سودا — تمام اندراج', css }))
+
+      // 14 · تفصیلی اخراجات → full expenses ledger (all addExpense entries, all-time).
+      // getExpenses() also returns a BARE array (ts-ASC; the builder reverses it).
+      const akhrajat = await g(() => window.api.getExpenses())
+      if (akhrajat) push('tafseeli_akhrajat', 'تفصیلی اخراجات', buildExpensesHtml({ rows: akhrajat || [], title: 'تفصیلی اخراجات — تمام اندراج', css }))
+
+      // روزنامچہ — today's daybook (kept). Same `today` basis as the 4 filtered reports.
+      try {
+        const day = await window.api.getDaybook(today)
+        push('roznamcha', 'روزنامچہ', buildDaybookReportHtml({ data: day, date: today, css }), true)
+      } catch { /* skip daybook */ }
+
+      if (!reports.length) return
+      const res = await window.api.generateReportPdfs({ reportsDir: dir, reports })
+      if (res && res.ok === false) console.warn('[reports] export failed:', res.reason)
+    } catch (e) { console.warn('[reports] export threw:', e && e.message || e) }
+    finally { reportsBusyRef.current = false }
+  }, [rates])
+
+  // Debounced trigger — several commits in quick succession export once (~1.5s
+  // after the last). Called from every transaction-commit point via a ref so it
+  // never has to sit in those callbacks' dependency arrays.
+  const scheduleReportsExport = useCallback(() => {
+    if (!rates || !rates.reports_dir) return
+    if (reportsTimerRef.current) clearTimeout(reportsTimerRef.current)
+    reportsTimerRef.current = setTimeout(() => { exportReportsToDrive() }, REPORTS_DEBOUNCE_MS)
+  }, [rates, exportReportsToDrive])
+  reportsExportRef.current = scheduleReportsExport
+
+  // Run ONE export shortly after the app finishes loading, so the Drive folder is
+  // already current the moment it opens. It goes through the SAME debounced
+  // scheduleReportsExport → the identical export pipeline and the one delete
+  // implementation in electron/reportPdf.cjs. After this, exports fire ONLY on a
+  // transaction commit (scheduleReportsExport, 1.5s-debounced, reportsBusyRef-guarded)
+  // — there is NO idle timer. Any pending debounce is cleared on unmount (app quit).
+  const reportsDir = rates && rates.reports_dir
+  useEffect(() => {
+    if (!reportsDir) return
+    if (reportsExportRef.current) reportsExportRef.current()
+    return () => {
+      if (reportsTimerRef.current) { clearTimeout(reportsTimerRef.current); reportsTimerRef.current = null }
+    }
+  }, [reportsDir])
 
   // Modal tabs (ادھار / اخراجات / حساب) open over the main workflow. Only one at a
   // time — every opener closes the other two.
@@ -372,20 +498,24 @@ export function AppProvider({ children }) {
       if (r) setRates({ ...r, date: todayISO() })
       const n = await window.api.nextReceiptNo()
       if (n) setReceiptNo(n)
-      // Restore any UNSAVED parchis left behind last session. Corrupt rows are
+      // Always open the LAST parchi in the shop — saved or unsaved. Startup used
+      // to restore only the newest stored DRAFT, so a session closed while
+      // VIEWING an older parchi reopened on that same one. Now it walks the SAME
+      // merged saved+draft timeline the ⏭ Last arrow uses (buildTimeline — one
+      // order by parchi number) and opens its final entry, i.e. the newest parchi
+      // overall regardless of what was on screen at close. Corrupt draft rows are
       // skipped silently (refreshDraftsCache parses each in try/catch) — startup
-      // never breaks. Show the NEWEST one — EMPTY OR NOT: a parked empty parchi
-      // is a legitimate slot that keeps its number across restarts (never pruned
-      // or skipped). Older ones are reachable via ◀. If none exist, stay on a
-      // fresh blank workbench.
+      // never breaks. A parked EMPTY parchi still counts: it's a legitimate slot
+      // that keeps its number across restarts. Older ones stay reachable via ◀.
+      // Nothing anywhere → stay on a fresh blank workbench.
       try {
         await refreshDraftsCache()
         await dedupeDraftNumbers() // heal any duplicate/colliding draft numbers (old bug)
-        const cache = draftsCacheRef.current
-        if (cache.length) {
-          const newest = cache[cache.length - 1]
-          applyDraft(newest.data)
-          setDraftSeq(newest.seq)
+        const timeline = await buildTimeline()
+        const newest = timeline.length ? timeline[timeline.length - 1] : null
+        if (newest) {
+          if (newest.kind === 'saved') await loadReceiptNo(newest.no)
+          else loadDraftBySeq(newest.seq)
         }
       } catch { /* any failure → start clean */ }
       draftReadyRef.current = true // startup restore done — auto-save may now run
@@ -1306,6 +1436,7 @@ export function AppProvider({ children }) {
     }
     if (hasApi) await window.api.addTransaction(txn)
     refresh()
+    try { reportsExportRef.current && reportsExportRef.current() } catch {}
     return txn
   }, [receiptNo, customer.id, rates.date, refresh])
 
@@ -1505,6 +1636,7 @@ export function AppProvider({ children }) {
       udhar: txns.some((t) => t.section === 'udhar') || f.udhar
     }))
     refresh()
+    try { reportsExportRef.current && reportsExportRef.current() } catch {}
 
     if (!isEdit) {
       // The unsaved parchi is now in the ledger — remove ITS draft row (other
@@ -1565,6 +1697,7 @@ export function AppProvider({ children }) {
     if (hasApi) await window.api.addTransaction({ receipt_no: rno, customer_id: cust.id, date: rates.date, ...t })
     setSavedFlags((f) => ({ ...f, udhar: true }))
     refresh()
+    try { reportsExportRef.current && reportsExportRef.current() } catch {}
     if (hasApi) {
       // Draft-aware advance: parked drafts (empty or not) occupy their numbers,
       // so the next displayed number must skip them as well as saved receipts.
@@ -1615,6 +1748,7 @@ export function AppProvider({ children }) {
     setReceiptNo(1)
     setSavedFlags(NO_SAVED)
     refresh()
+    try { reportsExportRef.current && reportsExportRef.current() } catch {}
   }, [refresh])
 
   // Reset ONLY کچا سونا لیا data (kacha transactions + their own receipts). Other
@@ -1624,6 +1758,7 @@ export function AppProvider({ children }) {
     if (!hasApi) return { ok: false }
     const res = await window.api.resetKachaGold()
     refresh()
+    try { reportsExportRef.current && reportsExportRef.current() } catch {}
     return res || { ok: true }
   }, [refresh])
 
@@ -1634,6 +1769,7 @@ export function AppProvider({ children }) {
     if (!hasApi) return { ok: false }
     const res = await window.api.resetKachaCounter()
     refresh()
+    try { reportsExportRef.current && reportsExportRef.current() } catch {}
     return res || { ok: true }
   }, [refresh])
 
@@ -1643,6 +1779,7 @@ export function AppProvider({ children }) {
   const addExpense = useCallback(async (e) => {
     if (hasApi) await window.api.addExpense(e)
     refresh()
+    try { reportsExportRef.current && reportsExportRef.current() } catch {}
     return { ok: true }
   }, [refresh])
 
@@ -1652,12 +1789,14 @@ export function AppProvider({ children }) {
   const editExpense = useCallback(async (id, fields) => {
     if (hasApi) await window.api.updateExpense(id, fields)
     refresh()
+    try { reportsExportRef.current && reportsExportRef.current() } catch {}
     return { ok: true }
   }, [refresh])
 
   const removeExpense = useCallback(async (id) => {
     if (hasApi) await window.api.deleteExpense(id)
     refresh()
+    try { reportsExportRef.current && reportsExportRef.current() } catch {}
     return { ok: true }
   }, [refresh])
 
@@ -1667,6 +1806,7 @@ export function AppProvider({ children }) {
     if (!hasApi) return { ok: false }
     const res = await window.api.resetExpenses()
     refresh()
+    try { reportsExportRef.current && reportsExportRef.current() } catch {}
     return res || { ok: true }
   }, [refresh])
 
@@ -1718,12 +1858,14 @@ export function AppProvider({ children }) {
   const editTransaction = useCallback(async (id, fields) => {
     if (hasApi) await window.api.updateTransaction(id, fields)
     refresh()
+    try { reportsExportRef.current && reportsExportRef.current() } catch {}
     return { ok: true }
   }, [refresh])
 
   const removeTransaction = useCallback(async (id) => {
     if (hasApi) await window.api.deleteTransaction(id)
     refresh()
+    try { reportsExportRef.current && reportsExportRef.current() } catch {}
     return { ok: true }
   }, [refresh])
 
@@ -1746,6 +1888,7 @@ export function AppProvider({ children }) {
     const rno = receiptNo
     if (hasApi) await window.api.settleTransaction({ receipt_no: rno, customer_id: c.id, date: rates.date, ...t })
     refresh()
+    try { reportsExportRef.current && reportsExportRef.current() } catch {}
     // Draft-aware advance (parked drafts occupy their numbers; see saveUdharTxn).
     if (hasApi) {
       const n = await computeNextParchiNo()
@@ -1770,6 +1913,8 @@ export function AppProvider({ children }) {
     receiptNo, setReceiptNo,
     customer, setCustomer, newCustomer, saveCustomer,
     totals, refresh, bump,
+    exportReportsToDrive, // manual "export reports now" (settings test button)
+    scheduleReportsExport, // debounced+guarded trigger for out-of-store commit points (نیا سودا)
     cashDisplay, addExpense, editExpense, removeExpense, resetExpensesData, addAdjustment,
     input, setInput, setWeight,
     overrides, setCell, clearCell, toggleParchi, resetEntry,
