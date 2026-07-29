@@ -40,7 +40,7 @@ export default function MainScreen() {
         {/* Working area: 2 columns × 2 rows. Row 1 = data-entry band (fixed),
             row 2 = receipts band (fills remaining height). */}
         <div
-          className="grid overflow-hidden"
+          className="relative grid overflow-hidden"
           style={{
             gridTemplateColumns: `${LEFT_W}px ${RIGHT_W}px`,
             gridTemplateRows: `${UPPER_H}px 1fr`
@@ -72,6 +72,22 @@ export default function MainScreen() {
           {/* r2c2 — right receipts */}
           <div className="overflow-hidden p-1 pt-0 border-l-2 border-line">
             <RightReceipts />
+          </div>
+
+          {/* Shop-name ticker gliding over the four receipt titles. Mounted
+              HERE (not in any panel) because the titles span two grid cells —
+              a per-panel strip would clip at the center divider. Out-of-flow
+              overlay: takes no space, blocks no clicks, skipped by print.
+              top = UPPER_H because row 2 (receipts, pt-0) starts right there. */}
+          <div
+            className="title-ticker no-print absolute left-0 right-0 z-20"
+            style={{ top: UPPER_H, height: 24, '--ticker-w': `${CANVAS_W}px` }}
+          >
+            <span dir="rtl" className="title-ticker-text">
+              <span className="title-ticker-gem">◆</span>
+              <span className="title-ticker-word urdu">چوہدری گولڈ لیبارٹری</span>
+              <span className="title-ticker-gem">◆</span>
+            </span>
           </div>
         </div>
 

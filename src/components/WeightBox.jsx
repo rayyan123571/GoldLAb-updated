@@ -1,13 +1,17 @@
 import React, { useRef } from 'react'
 import { useApp } from '../state/store.jsx'
 import { gramsToTMR, fmtNum } from '../logic/units.js'
+import { HK } from '../logic/hotkeys.js'
 
 // Top-left scale-entry box. Column order (left -> right):
 //   <row label> | (گرام) | تولہ | ماشہ | رتی
 // `inputRef` lets the parent target this row's input; `onEnter` (if given) runs
 // after the value is normalized when Enter is pressed (used to jump focus from
 // the gross row to the water row). Without onEnter, Enter just blurs.
-function WeightRow({ label, grams, onGrams, inputRef, onEnter }) {
+//
+// `hotkey` tags the گرام input for the global shortcuts (src/logic/hotkeys.js):
+// Alt+I lands in the gross row, F2 in the water row.
+function WeightRow({ label, grams, onGrams, inputRef, onEnter, hotkey }) {
   const tmr = gramsToTMR(grams)
   // Normalize the typed weight to exactly 4 decimals on Enter / blur, e.g.
   // "50" -> "50.0000", "46" -> "46.0000", "11.664" -> "11.6640". Writing the
@@ -23,6 +27,7 @@ function WeightRow({ label, grams, onGrams, inputRef, onEnter }) {
       <div className="hdr urdu w-28 justify-end pr-1 text-[15px] font-bold">{label}</div>
       <input
         ref={inputRef}
+        data-hotkey={hotkey}
         dir="ltr"
         className="inp text-center w-24 bg-mint font-bold text-[15px]"
         value={grams ?? ''}
@@ -67,12 +72,14 @@ export default function WeightBox() {
           const el = waterRef.current
           if (el) { el.focus(); el.select() }
         }}
+        hotkey={HK.WAZAN_SCALE}
       />
       <WeightRow
         label="وزن پانی میں"
         grams={input.malawat}
         onGrams={(v) => setWeight('malawat', v)}
         inputRef={waterRef}
+        hotkey={HK.WAZAN_WATER}
       />
     </div>
   )

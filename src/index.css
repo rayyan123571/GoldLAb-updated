@@ -4,6 +4,22 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ── Themeable main-screen greys (Defaults → تھیم / رنگ) ─────────────────────
+   Each rule re-points ONE Tailwind utility at a #root CSS variable, with the
+   class's EXACT current hex as the fallback. Placed AFTER @tailwind utilities so
+   it wins on equal specificity (source order). See src/logic/theme.js:
+     • Variables are set ONLY on #root. The print clone is built at <body> level,
+       outside #root, so it never sees them → var() falls back to the hex →
+       printed slips stay pixel-identical.
+     • No variable set (default) → hex fallback → an untouched install does not
+       change by one pixel.
+   NOTHING here renames a class; component markup is untouched. */
+.bg-panel      { background-color: var(--ui-panel, #d2d2d2); }
+.bg-header     { background-color: var(--ui-header, #bfbfbf); }
+.bg-headerDark { background-color: var(--ui-header-dark, #a4a4a4); }
+.border-line   { border-color: var(--ui-line, #9a9a9a); }
+.bg-gray-100   { background-color: var(--ui-surface, #f3f4f6); }
+
 :root {
   --line: #9a9a9a;
 }
@@ -390,6 +406,73 @@ input[type='number'] {
   padding: 0 6px !important;
 }
 
+/* --------------------------------------------------------------------------
+   TITLE TICKER — «◆ چوہدری گولڈ لیبارٹری ◆» gliding over the four receipt
+   panel titles. The strip is a full-canvas-width overlay mounted at the
+   MainScreen level (NOT inside any panel — the titles live in two separate
+   grid cells with a border between them, so a per-panel marquee would clip
+   at the divider). It floats above the titles without touching them:
+   out-of-flow (absolute), pointer-events:none, zero layout impact.
+   Animation is transform-only so it stays on the GPU compositor — this
+   machine runs all day. The 10s pause is baked into the keyframes
+   (50%→100% hold of a 20s cycle), no JS timers involved. ---------------- */
+.title-ticker {
+  overflow: hidden;
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  /* soften both ends so the capsule never looks chopped at the canvas edge */
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 4%, #000 96%, transparent);
+  mask-image: linear-gradient(90deg, transparent, #000 4%, #000 96%, transparent);
+}
+/* The moving element is a dark gold-rimmed CAPSULE, not bare text: gold
+   glyphs alone had almost no contrast against the light grey panel titles.
+   The capsule carries its own near-black background, so legibility no
+   longer depends on what it happens to be passing over.
+   Deliberately NO backdrop-filter/blur — this machine runs all day; a
+   solid rgba fill is free and looks the same. */
+.title-ticker-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 14px;
+  border-radius: 999px;
+  white-space: nowrap;
+  background: rgba(18, 16, 10, 0.92);
+  border: 1px solid rgba(212, 160, 23, 0.55);
+  box-shadow: 0 2px 7px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  will-change: transform;
+  /* --ticker-w is the fixed canvas width, injected inline from MainScreen
+     (single source of truth = CANVAS_W). 13s cycle: 0–76.923% = 10s glide
+     from off-left to off-right (Urdu ticker direction — same speed as the
+     old 20s cycle), 76.923–100% = 3s pause. */
+  animation: title-ticker-run 13s linear infinite;
+}
+.title-ticker-word {
+  font-weight: 700;
+  font-size: 13px;
+  line-height: 16px; /* keeps the capsule ≤ the 24px strip */
+  letter-spacing: 0.4px;
+  background: linear-gradient(90deg, #c9962a, #ffd977, #c9962a);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+}
+.title-ticker-gem {
+  font-size: 9px;
+  line-height: 16px;
+  color: #e0b64a;
+}
+@keyframes title-ticker-run {
+  0%       { transform: translateX(-100%); }
+  76.923%  { transform: translateX(var(--ticker-w, 1460px)); }
+  100%     { transform: translateX(var(--ticker-w, 1460px)); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .title-ticker-text { animation: none; visibility: hidden; }
+}
+
 /* ── Print / PDF: show ONLY the current report (.print-area), exclude app chrome.
    Drives both window.print() and Electron webContents.printToPDF (print media).
    RTL/Urdu is preserved because we print the already-rendered report DOM. ── */
@@ -452,9 +535,47 @@ input[type='number'] {
     background: transparent !important;
     box-shadow: none !important;
   }
-  body.thermal-print .print-area table { width: 100% !important; border-collapse: collapse !important; }
+  /* THE CLIP. .print-area already parks the content at the 6mm safe edge, but the
+     on-screen preview nests the receipt inside three more wrappers — a p-4 grey
+     backdrop, the 80mm "paper" strip, and a 64mm box carrying its own print:ml-[6mm].
+     Those offsets ADD UP on paper: measured, the 64mm table started at 16.4mm and
+     ran to 80.4mm — 10.4mm past the 70mm safe edge, which is the تاریخ / رقم column
+     falling off the right of the roll. They are preview chrome and nothing else, so
+     print flattens every wrapper that CONTAINS the receipt (:has) — .print-area
+     itself is untouched and keeps the one correct 6mm offset. */
+  body.thermal-print .print-area div:has(.thermal-receipt) {
+    width: 100% !important;
+    max-width: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: 0 !important;
+  }
+  /* NOT the clip fix — that is the wrapper flattening above. The table printed
+     here is ThermalTable (UdharForm.jsx, 10px), and it was already exactly 64mm
+     wide: `width: 100%` capped it, auto layout just shared that 64mm out by
+     natural column width. What fixed layout changes is the SHARE: equal columns
+     instead of نام taking ~33mm, so a long name wraps onto a second line rather
+     than squeezing the numeric columns. Widths are still capped either way.
+     (The ایکشن / یاد دہانی columns are .no-print → display:none, so they claim
+     none of that width.) */
+  body.thermal-print .print-area table {
+    width: 100% !important;
+    border-collapse: collapse !important;
+    table-layout: fixed !important;
+  }
+  /* Wrapping is what keeps a long value inside its narrower column: a name like
+     "Muhammad Ashraf Goldsmith" breaks onto a second line instead of forcing the
+     cell wider. 9px (down from ThermalTable's 10px) and the tighter 2px side
+     padding buy back room, so a full 27/07/2026 date still fits on one line. */
   body.thermal-print .print-area th,
-  body.thermal-print .print-area td { border: 1px solid #000 !important; padding: 1px 3px !important; }
+  body.thermal-print .print-area td {
+    border: 1px solid #000 !important;
+    padding: 1px 2px !important;
+    font-size: 9px !important;
+    white-space: normal !important;
+    overflow-wrap: anywhere !important;
+    word-break: break-word !important;
+  }
 }
 
 /* ── Main-screen receipt slip printing (printSlips). The clicked receipt panel is
@@ -515,3 +636,4 @@ input[type='number'] {
     padding: 4mm !important;
   }
 }
+

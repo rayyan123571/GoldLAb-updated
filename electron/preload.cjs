@@ -6,6 +6,16 @@ const call = (fn, ...args) => ipcRenderer.invoke('db', { fn, args })
 contextBridge.exposeInMainWorld('api', {
   getRates: () => call('getRates'),
   saveRates: (r) => call('saveRates', r),
+  // ٹوٹل panel pin gate. The raw pin crosses only on these three calls and is
+  // hashed in the main process (see electron/pinGate.cjs) — never stored plain.
+  pinStatus: () => call('pinStatus'),
+  pinCheck: (code) => call('pinCheck', code),
+  pinSet: (newPin, auth) => call('pinSet', newPin, auth),
+  // The DEVELOPER pin for ڈیفالٹ سیٹنگز → پرچی ہیڈر. Verify only — there is no
+  // set/change call on purpose, so the shopkeeper cannot take this lock over.
+  // The digest it is compared against lives in the main process (pinGate.cjs),
+  // never in the renderer bundle.
+  pinCheckDev: (code) => call('pinCheckDev', code),
   receiptNoExists: (n) => call('receiptNoExists', n),
   listDrafts: () => call('listDrafts'),
   upsertDraft: (seq, d) => call('upsertDraft', seq, d),
@@ -55,6 +65,15 @@ contextBridge.exposeInMainWorld('api', {
   saveNayaSodaDraft: (receiptNo, form) => call('saveNayaSodaDraft', receiptNo, form),
   clearNayaSodaDraft: (receiptNo) => call('clearNayaSodaDraft', receiptNo),
   exportPDF: (defaultName, opts) => ipcRenderer.invoke('export-pdf', { defaultName, ...(opts || {}) }),
+  // Auto report-PDF export to the synced (Google Drive) folder after a transaction.
+  generateReportPdfs: (payload) => ipcRenderer.invoke('generate-report-pdfs', payload || {}),
+  // Folder picker for the reports-folder setting (ڈیفالٹ سیٹنگز).
+  pickFolder: () => ipcRenderer.invoke('pick-folder'),
+  // Manual بیک اپ button — its own folder/config, independent of the automatic
+  // backup. status → { folder, lastBackupAt }; run → one dated snapshot copy.
+  manualBackupStatus: () => ipcRenderer.invoke('manual-backup-status'),
+  manualBackupPickFolder: () => ipcRenderer.invoke('manual-backup-pick-folder'),
+  manualBackupRun: () => ipcRenderer.invoke('manual-backup-run'),
   saveReceipt: (r) => call('saveReceipt', r),
   replaceReceipt: (arg) => call('replaceReceipt', arg),
   freeReceipt: (n) => call('freeReceipt', n),
@@ -69,7 +88,13 @@ contextBridge.exposeInMainWorld('api', {
   // اندراج رپورٹ — manual adjustment transactions only (date range optional).
   getAdjustmentsReport: (opts) => call('getAdjustmentsReport', opts),
   getKachaTotalForDate: (date) => call('getKachaTotalForDate', date),
-  getCustomerLedger: (id) => call('getCustomerLedger', id),
+  // beforeReceiptNo (optional) → the balance as it stood BEFORE that parchi (سابقہ).
+  // Omitted by the statement / customer-list callers, which want the live total.
+  getCustomerLedger: (id, beforeReceiptNo) => call('getCustomerLedger', id, beforeReceiptNo),
+  // Balances only ({ balance_gold, balance_cash }) — same math as getCustomerLedger
+  // without shipping the customer's whole transaction list across IPC. Used by the
+  // live on-screen boxes that display nothing but those two numbers.
+  getCustomerBalance: (id, beforeReceiptNo) => call('getCustomerBalance', id, beforeReceiptNo),
   listCustomersWithBalances: () => call('listCustomersWithBalances'),
   getDaybook: (date) => call('getDaybook', date),
   listDates: () => call('listDates'),

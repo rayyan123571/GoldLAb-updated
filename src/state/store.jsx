@@ -1,6 +1,16 @@
 import React, { createContext, useContext, useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { computeTable } from '../logic/purity.js'
 import { GRAMS_PER_TOLA, GRAMS_PER_RATTI, round } from '../logic/units.js'
+import { buildSlipHeader, buildSlipTerms, shopOf, SLIP_DESIGN_W } from '../logic/slipHeader.js'
+import {
+  serializeAppCss, buildDaybookReportHtml,
+  buildGoldBalanceHtml, buildCashBalanceHtml, buildGoldEntriesHtml, buildCashEntriesHtml,
+  buildNaqadEntriesHtml, buildKachaHtml, buildSaudaHtml, buildExpensesHtml
+} from '../logic/reportHtml.js'
+
+// Auto report-PDF export debounce: several commits in quick succession export
+// once, ~1.5s after the last (see exportReportsToDrive / scheduleReportsExport).
+const REPORTS_DEBOUNCE_MS = 1500
 
 // Pure-gold (khalis) + qeemat from a {wazan, point, rate} gold entry — the SAME
 // ratti-scale formula the نقد/ادھار panel's GoldRow uses, so a saved transaction
@@ -76,6 +86,27 @@ const FALLBACK_RATES = {
 
 const hasApi = typeof window !== 'undefined' && window.api
 
+// The settings fields a saved parchi legitimately owns: the rate context its
+// purity rows recompute from, plus the date it was written on. EVERYTHING else in
+// `rates` (shop header, printer/overlay setup — including a ~200 KB base64
+// overlay_bg_path image, theme, folders) belongs to the app as it is configured
+// TODAY, not to a parchi saved months ago.
+//
+// Used on both sides of the parchi payload: saveParchi stores only these, and
+// loadReceipt replays only these. Filtering on load matters just as much as on
+// save — receipts already in the database carry the whole old settings row, and
+// spreading that back over the live settings on every ◀/▶ press was both slow
+// (200 KB per navigation) and wrong (it reinstated stale printer settings).
+const RATE_CONTEXT_KEYS = [
+  'date', 'rate_tezabi_tola', 'rate_tezabi_gram', 'parchi_charges', 'fc_per_gram', 'point'
+]
+const rateContextOf = (r) => {
+  const out = {}
+  if (!r || typeof r !== 'object') return out
+  for (const k of RATE_CONTEXT_KEYS) if (r[k] !== undefined) out[k] = r[k]
+  return out
+}
+
 // Transient bottom-center toast for print failures — surfaces the reason instead
 // of failing silently (a failed print used to look like "nothing happened").
 function showPrintError(reason) {
@@ -111,55 +142,33 @@ function showToast(text, ok) {
   } catch {}
 }
 
-// ── Thermal slip header/footer — STATIC shop-identity text printed above/below
-// the cloned receipt panel. Display-only markup: never touches any value.
-// Classic bordered header block (reference-receipt style): one clean outer
-// rectangle, internal horizontal rules separating name / tagline / phones /
-// address. Sizes are DESIGN px — the raster path scales them ×~1.63 onto the
-// 576-dot canvas (name ≈ 42px printed, the largest text on the slip).
-function buildSlipHeader() {
-  const el = document.createElement('div')
-  el.dir = 'rtl'
-  el.className = 'urdu slip-header'
-  el.style.cssText = 'text-align:center;color:#000;border:2px solid #000;padding:3px 4px 0;margin-bottom:5px'
-  // Reference-receipt decorations: a sharp ZIGZAG rule under the tagline and a
-  // ☎ before each phone number. The zigzag is inline SVG (rasterizes crisply to
-  // 1-bit; non-scaling stroke keeps an even line width under the ×1.63 clone
-  // scale); ☎ (U+260E) is a monochrome glyph that thresholds cleanly on thermal.
-  let zz = 'M0 5'
-  for (let x = 0; x <= 240; x += 6) zz += ' L' + (x + 3) + ' 1 L' + (x + 6) + ' 5'
-  const wave = '<svg width="100%" height="6" viewBox="0 0 240 6" preserveAspectRatio="none" style="display:block;margin:3px 2px">' +
-    '<path d="' + zz + '" fill="none" stroke="#000" stroke-width="1.6" vector-effect="non-scaling-stroke"/></svg>'
-  const tel = '☎' // ☎
-  el.innerHTML =
-    '<div style="font-size:26px;font-weight:800;line-height:1.5">چوہدری گولڈ لیبارٹری</div>' +
-    '<div style="font-size:12.5px;font-weight:500;line-height:1.7">خالص سونے کی لین دین ۔ ہول سیل جیولری کا مرکز  (جیولری چوڑی میکر)</div>' +
-    // sharp zigzag decorative rule (as in the reference receipt)
-    wave +
-    '<div style="font-size:13.5px;font-weight:600;line-height:1.8">چوہدری ایم رمضان آرائیں&nbsp;&nbsp;<span dir="ltr">' + tel + '&nbsp;0300-7301839</span></div>' +
-    '<div style="font-size:14px;font-weight:600;line-height:1.7"><span dir="ltr">' + tel + '&nbsp;0302-7330000</span>&nbsp;&nbsp;&nbsp;<span dir="ltr">' + tel + '&nbsp;0302-3334440</span></div>' +
-    // address in its own ruled strip at the bottom of the box
-    '<div style="border-top:1.5px solid #000;margin-top:3px;padding:2px 0 4px;font-size:12.5px;font-weight:500;line-height:1.8">نزد موسیٰ پاک دربار صرافہ بازار ملتان</div>'
-  return el
-}
+// ── Thermal slip header ──────────────────────────────────────────────────────
+// Now lives in src/logic/slipHeader.js and is DATA-driven (settings.shop_*), so
+// the ڈیفالٹ سیٹنگز preview and the printed slip are literally the same code.
+// Every caller here passes `rates`, which carries the shop columns straight from
+// the settings table.
 
 // Footer: the sona-testing fee paragraph is LAB-ONLY; the software line (with
 // Rayyan 0307-6965231) prints on every slip.
-function buildSlipFooter(kind) {
+function buildSlipFooter(kind, rates) {
   const el = document.createElement('div')
   el.dir = 'rtl'
   el.className = 'urdu'
   el.style.cssText = 'color:#000;margin-top:5px'
-  const fee = kind === 'lab'
-    ? '<div style="font-size:12.5px;font-weight:500;line-height:2;text-align:right;border:1.5px solid #000;padding:3px 6px;margin-bottom:5px">' +
-      'سونا ٹیسٹ کرنے کی فیس 100 روپے اور خالص سونا یا رقم لینے کی صورت میں 40 روپے فی گرام مزدوری ہو گی۔ رزلٹ کے بعد سونا لینے یا رقم لینے کا اندر کا کارندہ پابند نہیں ہو گا۔ سونا صرف رتی کی صورت میں چیک کیا جاتا ہے۔ یہاں خالص سونے کا لین دین کیا جاتا ہے۔' +
-      '</div>'
-    : ''
-  el.innerHTML = fee +
+  // Lab-only terms/fee box — now DATA-DRIVEN (settings.slip_terms), built by the
+  // SAME buildSlipTerms() the ڈیفالٹ سیٹنگز preview uses, so the two never drift.
+  // Blank terms → null → no box at all.
+  if (kind === 'lab') {
+    const terms = buildSlipTerms(rates && rates.slip_terms)
+    if (terms) el.appendChild(terms)
+  }
+  // Software-vendor footer (services line + Rayyan) — NOT the shop's identity, so
+  // it stays hardcoded, byte-for-byte unchanged.
+  el.insertAdjacentHTML('beforeend',
     '<div style="font-size:12.5px;font-weight:500;line-height:1.9;text-align:center;border-top:2px solid #000;padding-top:4px">' +
     'لیبارٹری، کاسٹنگ سنٹر، ہول سیل شاپ، جیولری شاپ، چوڑی کڑے اور کارخانے کے سوفٹ ویئر دستیاب ہیں۔' +
     '<div dir="ltr" style="font-size:14px;font-weight:800;margin-top:2px">Rayyan&nbsp;&nbsp;0307-6965231</div>' +
-    '</div>'
+    '</div>')
   return el
 }
 
@@ -170,7 +179,7 @@ function buildSlipFooter(kind) {
 // cloned at its 341px design width and vector-scaled once to the 556px content
 // box — Chromium rasterizes glyphs at the FINAL size (no bitmap resize), and
 // the main process hard-thresholds that single render to 1-bit.
-function buildRasterSlipHtml(panelEl) {
+function buildRasterSlipHtml(panelEl, rates) {
   try {
     const clone = panelEl.cloneNode(true)
     // cloneNode copies attributes, NOT live input state — and outerHTML only
@@ -211,10 +220,10 @@ function buildRasterSlipHtml(panelEl) {
     // Packaged builds may refuse CSSOM access on file:// stylesheets — leave a
     // marker and the main process injects the built stylesheet from disk.
     if (!css || css.length < 500) css = '/*__APP_CSS__*/'
-    const DOTS = 576, PAD = 10, DESIGN_W = 341
+    const DOTS = 576, PAD = 10, DESIGN_W = SLIP_DESIGN_W
     const scale = (DOTS - 2 * PAD) / DESIGN_W
-    const header = buildSlipHeader().outerHTML
-    const footer = buildSlipFooter(panelEl.getAttribute('data-receipt') || '').outerHTML
+    const header = buildSlipHeader(rates).outerHTML
+    const footer = buildSlipFooter(panelEl.getAttribute('data-receipt') || '', rates).outerHTML
     return '<!doctype html><html dir="ltr"><head><meta charset="utf-8"><style>' + css +
       '\nhtml,body{margin:0!important;padding:0!important;background:#fff!important}' +
       // ── Print typography (203dpi thermal): BIGGER regular/medium text, not
@@ -294,15 +303,36 @@ function buildRasterSlipHtml(panelEl) {
 // (Save button → saveParchi → replaceReceipt, and loadReceipt reconstruction).
 const DEBUG_SAVE = false
 
+// واٹس ایپ یاد دہانی default template — the renderer's copy of WA_REMINDER_DEFAULT in
+// electron/shopDefaults.cjs (which seeds settings.whatsapp_reminder_text). The stored
+// value always wins; this is only the fallback for a DB that predates the column and
+// the text the "اصل پیغام بحال کریں" button restores. Keep the two in step.
+export const WA_REMINDER_DEFAULT = 'محترم، آپ کے ذمے {رقم} باقی ہیں۔ برائے مہربانی ادائیگی کر دیں۔ شکریہ'
+
 export function AppProvider({ children }) {
   const [screen, setScreen] = useState('main') // 'main' | 'daybook' | 'udhar'
   const [rates, setRates] = useState(FALLBACK_RATES)
+  // Where did the date currently in rates.date come from? `true` = it was INHERITED
+  // from a saved parchi that was opened for viewing (loadReceipt replays that
+  // parchi's stored rates, and its date rides along), `false` = it is the real
+  // working date — today's, or a date the shopkeeper typed himself.
+  //
+  // This exists because ONE field was doing two jobs. rates.date is both "the date
+  // printed on the parchi on screen" and "the date every new entry is filed under".
+  // Browsing to an old parchi to check something therefore silently re-dated every
+  // ادھار / کھرچہ recorded afterwards — a whole morning's work could land on the
+  // previous day. Now viewing an old parchi still shows ITS date (so the printed
+  // slip stays truthful) while new entries use entryDate below, which ignores an
+  // inherited date. A date the user TYPES is never overridden — back-dating an
+  // entry on purpose keeps working.
+  const [dateFromParchi, setDateFromParchi] = useState(false)
   const [receiptNo, setReceiptNo] = useState(1)
   // The receipt_no of the SAVED parchi currently open on screen (null while
   // composing a new, unsaved parchi). Drives First/Last/Next/Prev navigation.
   const [openReceiptNo, setOpenReceiptNo] = useState(null)
   const [udharOpen, setUdharOpen] = useState(false) // ادھار form/report modal
   const [akhrajatOpen, setAkhrajatOpen] = useState(false) // اخراجات (expenses) modal
+  const [hisabOpen, setHisabOpen] = useState(false) // حساب (cash position) modal
   // Extended customer shape. mobile2/telephone/address/imagePath are new; their
   // persistence needs an upsertCustomer backend extension (see note), but the
   // form and live state work with them today.
@@ -367,17 +397,159 @@ export function AppProvider({ children }) {
   const draftReadyRef = useRef(false)      // startup restore finished → auto-save may run
   const draftSeqRef = useRef(null)         // synchronous mirror of currentDraftSeq
   const draftsCacheRef = useRef([])        // [{ seq, data }] parsed, ascending by seq
+  const draftsLoadedRef = useRef(false)    // the cache has been read from the DB at least once
   const draftTimerRef = useRef(null)       // auto-save debounce handle
   const formSnapshotRef = useRef(null)     // { hasData, snap } latest composing form
   const persistInflightRef = useRef(Promise.resolve()) // serialize draft writes
+  const reportsTimerRef = useRef(null)     // debounce handle for the Drive report export
+  const reportsExportRef = useRef(null)    // latest scheduleReportsExport (called from commit points)
+  const reportsBusyRef = useRef(false)     // an export is mid-flight → never stack another
 
-  const refresh = useCallback(() => setBump((b) => b + 1), [])
+  // Saved receipt numbers, cached for the navigation timeline. ◀ ▶ ⏮ ⏭ each build
+  // the timeline, and the arrow-enable effect builds it again right after — three
+  // identical listReceiptNos round-trips per single step. The list can only change
+  // through a DB write, and EVERY write path ends in refresh(), so clearing the
+  // cache there keeps it exact while making repeat reads free.
+  const savedNosRef = useRef(null)         // Promise<number[]> | null
 
-  // Modal tabs (ادھار / اخراجات) open over the main workflow. Only one at a time.
-  const openUdhar = useCallback(() => { setScreen('main'); setAkhrajatOpen(false); setUdharOpen(true) }, [])
+  const refresh = useCallback(() => {
+    savedNosRef.current = null
+    setBump((b) => b + 1)
+  }, [])
+
+  const listSavedNos = useCallback(async () => {
+    if (!hasApi || !window.api.listReceiptNos) return []
+    if (!savedNosRef.current) savedNosRef.current = window.api.listReceiptNos()
+    try {
+      return (await savedNosRef.current) || []
+    } catch {
+      savedNosRef.current = null // a failed read must never stick in the cache
+      return []
+    }
+  }, [])
+
+  // ── Auto report-PDF export to the synced (Google Drive) folder ──────────────
+  // After a transaction, regenerate ONE report per main-screen ACTION BUTTON into
+  // settings.reports_dir so a remote client always sees the latest. Each report is
+  // the FULL, all-time, unfiltered record set for that button's transaction type,
+  // EXCEPT the four آج reports (today-only, same date basis as روزنامچہ/getDaybook)
+  // plus روزنامچہ itself. Best-effort: any failure is swallowed here and in main —
+  // it can NEVER block a save or crash, and NEVER touches the DB (electron/reportPdf.cjs).
+  const exportReportsToDrive = useCallback(async () => {
+    // If a prior export is still running (e.g. the load export overlapping a fast
+    // first commit), skip this round rather than stacking two batches that would
+    // delete each other's freshly-written files.
+    if (reportsBusyRef.current) return
+    reportsBusyRef.current = true
+    try {
+      const dir = rates && rates.reports_dir
+      if (!dir || !hasApi || !window.api.generateReportPdfs) return
+      const css = serializeAppCss()
+      // "today" = the app's working local date (rates.date, forced to todayISO() on
+      // load) — the SAME basis روزنامچہ/getDaybook uses, so "today" is consistent
+      // app-wide. todaySub shows it as DD/MM/YYYY (matching the reports' isoToDisp).
+      const today = (rates && rates.date) || todayISO()
+      const todaySub = 'آج · ' + String(today).split('-').reverse().join('/')
+      const reports = []
+      const g = async (fn) => { try { return await fn() } catch { return null } }
+      // `label` becomes the VISIBLE Urdu filename ("<label>__<YYYY-MM-DD_HH-mm-ss>.pdf")
+      // so the operator reads the folder in Urdu; reportKey stays the internal id used
+      // for the safe delete filter. Main sanitizes the label (see safeFileLabel).
+      const push = (reportKey, label, html, landscape) => {
+        if (html) reports.push({ reportKey, label, html, pageSize: 'A4', landscape: !!landscape })
+      }
+
+      // 1–4 · لینا/دینا ہے → net balance per customer (all-time).
+      const gl = await g(() => window.api.reportGoldBalanceNet('lena', {}))
+      if (gl) push('tezabi_lena_hai', 'تیزابی لینا ہے', buildGoldBalanceHtml({ rows: gl.rows || [], title: 'تیزابی لینا ہے (بیلنس)', css }))
+      const gd = await g(() => window.api.reportGoldBalanceNet('dena', {}))
+      if (gd) push('tezabi_dena_hai', 'تیزابی دینا ہے', buildGoldBalanceHtml({ rows: gd.rows || [], title: 'تیزابی دینا ہے (بیلنس)', css }))
+      const cl = await g(() => window.api.reportCashBalanceNet('lena', {}))
+      if (cl) push('raqam_leni_hai', 'رقم لینی ہے', buildCashBalanceHtml({ rows: cl.rows || [], title: 'رقم لینی ہے (بیلنس)', css }))
+      const cd = await g(() => window.api.reportCashBalanceNet('dena', {}))
+      if (cd) push('raqam_deni_hai', 'رقم دینی ہے', buildCashBalanceHtml({ rows: cd.rows || [], title: 'رقم دینی ہے (بیلنس)', css }))
+
+      // 5–8 · آج کا/کی ادھار → TODAY-ONLY entry list of that credit category (date ==
+      // today's local date, the SAME basis روزنامچہ/getDaybook uses = rates.date). An
+      // empty day still produces the file (with "آج کوئی اندراج نہیں") so a stale
+      // old-day PDF never lingers. from == to == today → getReport gives t.date = today.
+      const cg = await g(() => window.api.getReport({ category: 'cash_give', from: today, to: today }))
+      if (cg) push('udhaar_raqam_di', 'آج کی ادھار رقم دی', buildCashEntriesHtml({ rows: cg.rows || [], title: 'آج کی ادھار رقم دی', subtitle: todaySub, emptyText: 'آج کوئی اندراج نہیں', css }))
+      const ct = await g(() => window.api.getReport({ category: 'cash_take', from: today, to: today }))
+      if (ct) push('udhaar_raqam_aamad', 'آج کی ادھار رقم آمد', buildCashEntriesHtml({ rows: ct.rows || [], title: 'آج کی ادھار رقم آمد', subtitle: todaySub, emptyText: 'آج کوئی اندراج نہیں', css }))
+      const gg = await g(() => window.api.getReport({ category: 'gold_give', from: today, to: today }))
+      if (gg) push('tezabi_udhaar_diya', 'آج کا تیزابی ادھار دیا', buildGoldEntriesHtml({ rows: gg.rows || [], title: 'آج کا تیزابی ادھار دیا', subtitle: todaySub, emptyText: 'آج کوئی اندراج نہیں', css }))
+      const gt = await g(() => window.api.getReport({ category: 'gold_take', from: today, to: today }))
+      if (gt) push('tezabi_udhaar_liya', 'آج کا تیزابی ادھار لیا', buildGoldEntriesHtml({ rows: gt.rows || [], title: 'آج کا تیزابی ادھار لیا', subtitle: todaySub, emptyText: 'آج کوئی اندراج نہیں', css }))
+
+      // 9–10 · نقد فروخت / نقد خرید → all naqad entries (all-time).
+      const sell = await g(() => window.api.getReport({ category: 'gold_sell' }))
+      if (sell) push('naqad_farokht', 'نقد فروخت', buildNaqadEntriesHtml({ rows: sell.rows || [], title: 'نقد فروخت — تمام اندراج', css }))
+      const buy = await g(() => window.api.getReport({ category: 'gold_buy' }))
+      if (buy) push('naqad_khareed', 'نقد خرید', buildNaqadEntriesHtml({ rows: buy.rows || [], title: 'نقد خرید — تمام اندراج', css }))
+
+      // 11 · کچا سونا لیا → all kacha entries (all-time).
+      const kacha = await g(() => window.api.reportKachaGold({}))
+      if (kacha) push('kacha_sona_liya', 'کچا سونا لیا', buildKachaHtml({ rows: kacha.rows || [], title: 'کچا سونا لیا — تمام اندراج', css }))
+
+      // 12–13 · نیا سودا deals → settled (بھگتان) + outstanding (بقایا), all-time.
+      // listNayaSoda returns a BARE array, already newest-first (id DESC).
+      const bhugtan = await g(() => window.api.listNayaSoda('bhugtan'))
+      if (bhugtan) push('bhugtan_sauda', 'بھگتان سودا', buildSaudaHtml({ rows: bhugtan || [], title: 'بھگتان سودا — تمام اندراج', css }))
+      const baqaya = await g(() => window.api.listNayaSoda('bakaya'))
+      if (baqaya) push('baqaya_sauda', 'بقایا سودا', buildSaudaHtml({ rows: baqaya || [], title: 'بقایا سودا — تمام اندراج', css }))
+
+      // 14 · تفصیلی اخراجات → full expenses ledger (all addExpense entries, all-time).
+      // getExpenses() also returns a BARE array (ts-ASC; the builder reverses it).
+      const akhrajat = await g(() => window.api.getExpenses())
+      if (akhrajat) push('tafseeli_akhrajat', 'تفصیلی اخراجات', buildExpensesHtml({ rows: akhrajat || [], title: 'تفصیلی اخراجات — تمام اندراج', css }))
+
+      // روزنامچہ — today's daybook (kept). Same `today` basis as the 4 filtered reports.
+      try {
+        const day = await window.api.getDaybook(today)
+        push('roznamcha', 'روزنامچہ', buildDaybookReportHtml({ data: day, date: today, css }), true)
+      } catch { /* skip daybook */ }
+
+      if (!reports.length) return
+      const res = await window.api.generateReportPdfs({ reportsDir: dir, reports })
+      if (res && res.ok === false) console.warn('[reports] export failed:', res.reason)
+    } catch (e) { console.warn('[reports] export threw:', e && e.message || e) }
+    finally { reportsBusyRef.current = false }
+  }, [rates])
+
+  // Debounced trigger — several commits in quick succession export once (~1.5s
+  // after the last). Called from every transaction-commit point via a ref so it
+  // never has to sit in those callbacks' dependency arrays.
+  const scheduleReportsExport = useCallback(() => {
+    if (!rates || !rates.reports_dir) return
+    if (reportsTimerRef.current) clearTimeout(reportsTimerRef.current)
+    reportsTimerRef.current = setTimeout(() => { exportReportsToDrive() }, REPORTS_DEBOUNCE_MS)
+  }, [rates, exportReportsToDrive])
+  reportsExportRef.current = scheduleReportsExport
+
+  // Run ONE export shortly after the app finishes loading, so the Drive folder is
+  // already current the moment it opens. It goes through the SAME debounced
+  // scheduleReportsExport → the identical export pipeline and the one delete
+  // implementation in electron/reportPdf.cjs. After this, exports fire ONLY on a
+  // transaction commit (scheduleReportsExport, 1.5s-debounced, reportsBusyRef-guarded)
+  // — there is NO idle timer. Any pending debounce is cleared on unmount (app quit).
+  const reportsDir = rates && rates.reports_dir
+  useEffect(() => {
+    if (!reportsDir) return
+    if (reportsExportRef.current) reportsExportRef.current()
+    return () => {
+      if (reportsTimerRef.current) { clearTimeout(reportsTimerRef.current); reportsTimerRef.current = null }
+    }
+  }, [reportsDir])
+
+  // Modal tabs (ادھار / اخراجات / حساب) open over the main workflow. Only one at a
+  // time — every opener closes the other two.
+  const openUdhar = useCallback(() => { setScreen('main'); setAkhrajatOpen(false); setHisabOpen(false); setUdharOpen(true) }, [])
   const closeUdhar = useCallback(() => setUdharOpen(false), [])
-  const openAkhrajat = useCallback(() => { setScreen('main'); setUdharOpen(false); setAkhrajatOpen(true) }, [])
+  const openAkhrajat = useCallback(() => { setScreen('main'); setUdharOpen(false); setHisabOpen(false); setAkhrajatOpen(true) }, [])
   const closeAkhrajat = useCallback(() => setAkhrajatOpen(false), [])
+  const openHisab = useCallback(() => { setScreen('main'); setUdharOpen(false); setAkhrajatOpen(false); setHisabOpen(true) }, [])
+  const closeHisab = useCallback(() => setHisabOpen(false), [])
 
   // Initial load
   useEffect(() => {
@@ -389,22 +561,38 @@ export function AppProvider({ children }) {
       if (r) setRates({ ...r, date: todayISO() })
       const n = await window.api.nextReceiptNo()
       if (n) setReceiptNo(n)
-      // Restore any UNSAVED parchis left behind last session. Corrupt rows are
+      // Always open the LAST parchi in the shop — saved or unsaved. Startup used
+      // to restore only the newest stored DRAFT, so a session closed while
+      // VIEWING an older parchi reopened on that same one. Now it walks the SAME
+      // merged saved+draft timeline the ⏭ Last arrow uses (buildTimeline — one
+      // order by parchi number) and opens its final entry, i.e. the newest parchi
+      // overall regardless of what was on screen at close. Corrupt draft rows are
       // skipped silently (refreshDraftsCache parses each in try/catch) — startup
-      // never breaks. Show the NEWEST one — EMPTY OR NOT: a parked empty parchi
-      // is a legitimate slot that keeps its number across restarts (never pruned
-      // or skipped). Older ones are reachable via ◀. If none exist, stay on a
-      // fresh blank workbench.
+      // never breaks. A parked EMPTY parchi still counts: it's a legitimate slot
+      // that keeps its number across restarts. Older ones stay reachable via ◀.
+      // Nothing anywhere → stay on a fresh blank workbench.
       try {
         await refreshDraftsCache()
         await dedupeDraftNumbers() // heal any duplicate/colliding draft numbers (old bug)
-        const cache = draftsCacheRef.current
-        if (cache.length) {
-          const newest = cache[cache.length - 1]
-          applyDraft(newest.data)
-          setDraftSeq(newest.seq)
+        const timeline = await buildTimeline()
+        const newest = timeline.length ? timeline[timeline.length - 1] : null
+        if (newest) {
+          if (newest.kind === 'saved') await loadReceiptNo(newest.no)
+          else loadDraftBySeq(newest.seq)
         }
       } catch { /* any failure → start clean */ }
+      // The restore above may have put an OLD date on screen: loadReceipt replays
+      // the opened parchi's saved `rates`, and `date` rides along inside them, so
+      // opening on yesterday's last parchi silently rewound the whole app's
+      // working date. That date is what EVERY save is stamped with (parchi rows,
+      // ادھار, اخراجات — see saveParchi/saveUdharTxn), so a fresh morning's work
+      // was being filed under the previous day and the روزنامچہ for آج looked
+      // empty. Startup must always land on TODAY, whatever the restored parchi
+      // says — this runs last so it wins over line 498's set AND the restore.
+      // (Browsing to an old parchi with ◀ ▶ still shows that parchi's own date,
+      // so printing an old slip keeps its original date.)
+      setRates((r) => ({ ...r, date: todayISO() }))
+      setDateFromParchi(false)
       draftReadyRef.current = true // startup restore done — auto-save may now run
     })()
   }, [])
@@ -454,6 +642,15 @@ export function AppProvider({ children }) {
   // current settings date (display-only; the DB cash balance/ledger is never
   // reduced by expenses).
   const cashDisplay = (Number(totals.cash) || 0) - expensesUpToDate
+
+  // The date a NEW standalone entry (ادھار action button, کھرچہ) is filed under.
+  // Same as the تاریخ field in every normal case — but when that field only holds
+  // a date INHERITED from an old parchi opened for viewing, today wins. Without
+  // this, glancing at a two-week-old parchi silently filed the next ادھار entry
+  // two weeks back, where no report for today would ever show it.
+  // saveParchi deliberately does NOT use this: editing a saved parchi must keep
+  // that parchi's own date, and a new parchi already starts on today.
+  const entryDate = dateFromParchi ? todayISO() : (rates.date || todayISO())
 
   // PART 1: the sidebar "پرچوں لیا" checkbox DRIVES "اجرت کا سونا" — ticking پرچوں لیا
   // ticks اجرت کا سونا, unticking unticks it. اجرت کا سونا being on is what the
@@ -534,6 +731,9 @@ export function AppProvider({ children }) {
   // ---- actions ----
   const saveRates = useCallback(async (patch) => {
     const next = { ...rates, ...patch }
+    // A date coming through here was CHOSEN (the تاریخ field, DefaultsForm), so it
+    // becomes the real working date — deliberate back-dating is honoured.
+    if (patch && Object.prototype.hasOwnProperty.call(patch, 'date')) setDateFromParchi(false)
     setRates(next)
     if (hasApi) await window.api.saveRates(next)
   }, [rates])
@@ -554,9 +754,12 @@ export function AppProvider({ children }) {
       // No slipData → fall back to the older clone-based HTML path.
       let payload = null
       if (slipData) {
-        payload = { data: slipData, copies: n }
+        // The shop header rides along with the slip data: rasterPrint.cjs renders
+        // the header from `shop`, so the printed header always shows the CURRENT
+        // ڈیفالٹ سیٹنگز values — the same ones the settings preview draws.
+        payload = { data: { ...slipData, shop: shopOf(rates), terms: String(rates.slip_terms ?? '') }, copies: n }
       } else {
-        const rasterHtml = buildRasterSlipHtml(panelEl)
+        const rasterHtml = buildRasterSlipHtml(panelEl, rates)
         if (rasterHtml) payload = { html: rasterHtml, copies: n }
       }
       if (payload) {
@@ -637,9 +840,9 @@ export function AppProvider({ children }) {
       // Slip = [SHOP HEADER] → [receipt body, exactly as on screen] → [FOOTER].
       // The fee paragraph is lab-only; data-receipt on the panel root says which
       // receipt this is (lab / naqad / udhar / wasooli).
-      inner.appendChild(buildSlipHeader())
+      inner.appendChild(buildSlipHeader(rates))
       inner.appendChild(clone)
-      inner.appendChild(buildSlipFooter(panelEl.getAttribute('data-receipt') || ''))
+      inner.appendChild(buildSlipFooter(panelEl.getAttribute('data-receipt') || '', rates))
       area.appendChild(inner)
       root.appendChild(area)
       overlay.appendChild(root)
@@ -676,7 +879,10 @@ export function AppProvider({ children }) {
       if (overlay) { overlay.remove(); document.body.classList.remove('slip-print') }
       if (pageStyle) pageStyle.remove()
     }
-  }, [rates.slip_count])
+    // `rates` in full (not just slip_count): the slip header is now built from the
+    // shop_* settings it carries, so an edit in ڈیفالٹ سیٹنگز must reach the very
+    // next print.
+  }, [rates])
 
   // WhatsApp share: build the SAME slip the printer gets (shop header → the
   // clicked receipt exactly as on screen → footer), show it briefly as a
@@ -733,9 +939,9 @@ export function AppProvider({ children }) {
       // shared picture matches the printed slip exactly. (Field sync above runs
       // first, on the identical index order of panel vs clone.)
       clone.querySelectorAll('.no-print').forEach((n) => { try { n.remove() } catch {} })
-      inner.appendChild(buildSlipHeader())
+      inner.appendChild(buildSlipHeader(rates))
       inner.appendChild(clone)
-      inner.appendChild(buildSlipFooter(panelEl.getAttribute('data-receipt') || ''))
+      inner.appendChild(buildSlipFooter(panelEl.getAttribute('data-receipt') || '', rates))
       card.appendChild(inner)
       overlay.appendChild(card)
       document.body.appendChild(overlay)
@@ -765,7 +971,8 @@ export function AppProvider({ children }) {
       if (overlay) { try { overlay.remove() } catch {} }
     }
     openWa()
-  }, [])
+    // `rates` — the shared slip image carries the same shop header as the print.
+  }, [rates])
 
   // Change a top weight (gross / water). Changing a weight reruns the forward
   // calc fresh for all 5 rows, so any per-row manual edits (e.g. Baqi Raqam
@@ -864,7 +1071,19 @@ export function AppProvider({ children }) {
       catch { /* skip a corrupt row */ }
     }
     draftsCacheRef.current = parsed
-    setDraftSeqs(parsed.map((p) => p.seq))
+    draftsLoadedRef.current = true
+    // Keep the SAME array when the seqs are unchanged. This is not a micro-
+    // optimisation — it closes a feedback loop that had the app querying the
+    // database ~83 times a second while sitting completely idle: the nav-arrow
+    // effect lists `draftSeqs` in its dependencies and (through buildTimeline)
+    // called this function, and a fresh array every time meant the dependency
+    // "changed" on every pass, so the effect immediately re-ran itself, forever.
+    // React bails out of the update when the value is identical.
+    setDraftSeqs((prev) => {
+      const next = parsed.map((p) => p.seq)
+      const same = prev.length === next.length && prev.every((v, i) => v === next[i])
+      return same ? prev : next
+    })
   }, [])
 
   // The number a brand-new unsaved parchi should get: the lowest positive integer
@@ -959,10 +1178,24 @@ export function AppProvider({ children }) {
       if (!hasApi) return
       const fs = formSnapshotRef.current
       if (!fs) return
-      if (force || fs.hasData || draftSeqRef.current != null) {
-        const res = await window.api.upsertDraft(draftSeqRef.current, fs.snap)
-        if (res && res.seq != null) setDraftSeq(res.seq)
+      if (!(force || fs.hasData || draftSeqRef.current != null)) return
+      const seq = draftSeqRef.current
+      const json = JSON.stringify(fs.snap)
+      // NO-OP GUARD. Merely LOOKING at parked parchis (◀ ▶ ⏮ ⏭) parks each one
+      // again on the way out, and every such write makes the main process
+      // re-serialise and rewrite the ENTIRE database file — the single biggest
+      // cause of the lag between pressing an arrow and the parchi changing. When
+      // the form is byte-identical to the row already stored, there is nothing to
+      // write: skip the DB call (and the cache re-read) completely. Typing still
+      // parks normally, because then the snapshot differs. `cached.data` was
+      // parsed from a string this same JSON.stringify produced, so the comparison
+      // is exact.
+      if (seq != null) {
+        const cached = draftsCacheRef.current.find((p) => p.seq === seq)
+        if (cached && JSON.stringify(cached.data) === json) return
       }
+      const res = await window.api.upsertDraft(seq, json)
+      if (res && res.seq != null) setDraftSeq(res.seq)
       await refreshDraftsCache()
     }
     const p = persistInflightRef.current.then(run, run)
@@ -1023,6 +1256,7 @@ export function AppProvider({ children }) {
     setDraftSeq(null)
     setSavedFlags(NO_SAVED)
     setRates((r) => ({ ...r, date: todayISO() }))
+    setDateFromParchi(false)
     setOpenReceiptNo(null)
     const nn = await computeNextParchiNo()
     setReceiptNo(nn)
@@ -1044,9 +1278,15 @@ export function AppProvider({ children }) {
   // by seq; the blank workbench is one PAST the end of this array, never an
   // entry in it. A saved/draft tie at the SAME number (a reused number) keeps
   // saved first — both are visited, never skipped, never looped.
+  // SPEED: both reads are served from memory on a plain step. The drafts table is
+  // written ONLY through this store, and every one of those writes ends with
+  // refreshDraftsCache(), so draftsCacheRef is already the current truth — it is
+  // re-read here only if it has never been loaded. listSavedNos is cached until the
+  // next refresh(). Together these turned each ◀/▶ press from six DB round-trips
+  // (listDrafts ×3 + listReceiptNos ×2 + the parchi itself) into one.
   const buildTimeline = useCallback(async () => {
-    const savedNos = (hasApi && window.api.listReceiptNos) ? (await window.api.listReceiptNos()) : []
-    await refreshDraftsCache()
+    const savedNos = await listSavedNos()
+    if (!draftsLoadedRef.current) await refreshDraftsCache()
     const entries = savedNos.map((no) => ({ kind: 'saved', no: Number(no), seq: null }))
     for (const d of draftsCacheRef.current) {
       // EVERY stored draft is an entry — INCLUDING parked EMPTY parchis. An
@@ -1064,7 +1304,7 @@ export function AppProvider({ children }) {
       return (a.seq ?? 0) - (b.seq ?? 0)
     })
     return entries
-  }, [refreshDraftsCache])
+  }, [listSavedNos, refreshDraftsCache])
 
   // This app's CURRENT position in `timeline` — the index of the open saved
   // receipt or stored draft, or `timeline.length` (one PAST the end) for the
@@ -1130,7 +1370,15 @@ export function AppProvider({ children }) {
 
     // Restore the rate context the parchi was saved under, so the purity rows
     // recompute to EXACTLY the values that were saved (khalis/qeemat depend on it).
-    if (payload.rates) setRates((r) => ({ ...r, ...payload.rates }))
+    // The date rides along (the slip must print the parchi's OWN date), so flag it
+    // as inherited — entryDate then keeps new ادھار/کھرچہ entries on today.
+    // Only the rate context is replayed (see RATE_CONTEXT_KEYS) — never the printer
+    // / shop / overlay settings an older payload also happens to contain.
+    if (payload.rates) {
+      const ctx = rateContextOf(payload.rates)
+      setRates((r) => ({ ...r, ...ctx }))
+      if (ctx.date) setDateFromParchi(true)
+    }
 
     // Purity-table line-items (Local/Copper/Standard/Silver/Pure Silver) are fully
     // determined by the top weights + per-row overrides + rates. Restore them.
@@ -1316,6 +1564,7 @@ export function AppProvider({ children }) {
     }
     if (hasApi) await window.api.addTransaction(txn)
     refresh()
+    try { reportsExportRef.current && reportsExportRef.current() } catch {}
     return txn
   }, [receiptNo, customer.id, rates.date, refresh])
 
@@ -1436,6 +1685,11 @@ export function AppProvider({ children }) {
     // parchi below.
     const nameEmpty = !customer.id && !(customer.name && customer.name.trim())
     const entriesEmpty = !txns.length && !hasPurity
+    // Does this parchi carry any ادھار (credit) entry — تیزابی دیا/لیا, ادھار کیش
+    // دیا/لیا? Those are LEDGER records: they only exist against a customer, so a
+    // saved customer is mandatory for them. A parchi with only نقد and/or lab
+    // (purity/kacha) work belongs to no one in particular and saves nameless.
+    const hasUdhar = txns.some((t) => t.section === 'udhar')
     if (isEdit && nameEmpty) {
       if (entriesEmpty) {
         if (hasApi) await window.api.freeReceipt(rno)
@@ -1444,34 +1698,49 @@ export function AppProvider({ children }) {
         refresh()
         return { ok: true, receipt_no: rno, freed: true }
       }
-      return { ok: false, message: 'پہلے تمام اندراج ختم کریں، پھر نام ہٹائیں' }
+      // Clearing the name while ادھار entries remain would orphan them → wrong
+      // order. نقد/lab entries need no name, so they fall through and re-save
+      // nameless (customer_id null) instead of being blocked.
+      if (hasUdhar) return { ok: false, message: 'پہلے تمام اندراج ختم کریں، پھر نام ہٹائیں' }
     }
 
-    // Name mandatory for any parchi save (ledger + snapshot are keyed to a customer).
     // The customer must ALREADY be saved — ensureCustomer never creates one now.
+    // MANDATORY only for a parchi with ادھار entries; otherwise null is allowed.
     const cust = await ensureCustomer()
-    if (!cust || !cust.id) {
+    if (hasUdhar && (!cust || !cust.id)) {
       const typed = (customer.name || '').trim()
       return {
         ok: false,
         message: typed
           ? 'یہ کسٹمر محفوظ نہیں — فہرست سے منتخب کریں یا "+" سے نیا کسٹمر شامل کریں'
-          : 'پہلے کسٹمر منتخب کریں'
+          : 'براہِ کرم پہلے کسٹمر کا نام درج کریں'
       }
     }
+    // Nameless نقد/lab parchi → customer_id null (like manual اندراج rows). It shows
+    // in the نقد/lab/daybook reports with name "-", and — being keyed to no customer
+    // — never in an ادھار / balance / statement report.
+    const custId = (cust && cust.id) || null
 
     // Current line-items for this receipt (strip the UI-only `section` tag).
-    const rows = txns.map(({ section, ...row }) => ({ customer_id: cust.id, date: rates.date, ...row }))
+    const rows = txns.map(({ section, ...row }) => ({ customer_id: custId, date: rates.date, ...row }))
 
     // FULL snapshot payload so reopening restores every entry (purity line-items
     // via input+overrides+rates, plus the نقد/ادھار entries) — symmetric with
     // loadReceipt, which reads exactly these fields back.
+    //
+    // `rates` is stored as the RATE CONTEXT ONLY (rateContextOf) — not the whole
+    // settings row. The settings row also carries the printing setup, including
+    // overlay_bg_path, which is a ~200 KB base64 image: copying it into every
+    // receipt made each saved parchi ~205 KB, so simply opening one had to read,
+    // ship and parse a 200 KB image on every ◀/▶ press. It also meant reopening an
+    // old parchi replayed that parchi's printer/shop settings over the CURRENT
+    // ones. The rate context is what the purity rows actually recompute from.
     const payload = {
       receipt_no: rno,
-      customer: { id: cust.id, name: cust.name, mobile: cust.mobile },
+      customer: { id: custId, name: (cust && cust.name) || '', mobile: (cust && cust.mobile) || '' },
       input: { wazan: input.wazan, malawat: input.malawat },
       overrides,
-      rates,
+      rates: rateContextOf(rates),
       entries: { cashSell, cashBuy, udharGive, udharTake, udharCashGive, udharCashTake },
       sidebar: { ujratKaSona, parchunLiya, sonaDiya, cashDiya },
       comment: udharComment
@@ -1489,7 +1758,7 @@ export function AppProvider({ children }) {
       }
       if (DEBUG_SAVE) console.log('[saveParchi] replaceReceipt', { rno, isEdit, rows })
       const res = await window.api.replaceReceipt({
-        receipt: { receipt_no: rno, type: 'parchi', customer_id: cust.id, date: rates.date, payload },
+        receipt: { receipt_no: rno, type: 'parchi', customer_id: custId, date: rates.date, payload },
         transactions: rows
       })
       if (DEBUG_SAVE) console.log('[saveParchi] replaceReceipt result', res)
@@ -1503,6 +1772,7 @@ export function AppProvider({ children }) {
       udhar: txns.some((t) => t.section === 'udhar') || f.udhar
     }))
     refresh()
+    try { reportsExportRef.current && reportsExportRef.current() } catch {}
 
     if (!isEdit) {
       // The unsaved parchi is now in the ledger — remove ITS draft row (other
@@ -1560,9 +1830,12 @@ export function AppProvider({ children }) {
     }
     if (!cust || !cust.id) return { ok: false, message: 'پہلے کسٹمر کا نام منتخب کریں / درج کریں' }
     const rno = receiptNo
-    if (hasApi) await window.api.addTransaction({ receipt_no: rno, customer_id: cust.id, date: rates.date, ...t })
+    // entryDate, NOT rates.date: an ادھار entry made while an OLD parchi happens to
+    // be open on screen still belongs to today (see entryDate above).
+    if (hasApi) await window.api.addTransaction({ receipt_no: rno, customer_id: cust.id, date: entryDate, ...t })
     setSavedFlags((f) => ({ ...f, udhar: true }))
     refresh()
+    try { reportsExportRef.current && reportsExportRef.current() } catch {}
     if (hasApi) {
       // Draft-aware advance: parked drafts (empty or not) occupy their numbers,
       // so the next displayed number must skip them as well as saved receipts.
@@ -1583,7 +1856,7 @@ export function AppProvider({ children }) {
       setReceiptNo((r) => r + 1)
     }
     return { ok: true, receipt_no: rno, customer: cust }
-  }, [ensureCustomer, receiptNo, rates.date, refresh, computeNextParchiNo, refreshDraftsCache])
+  }, [ensureCustomer, receiptNo, entryDate, refresh, computeNextParchiNo, refreshDraftsCache])
 
   // Stage 6 — open a fresh, blank parchi at the next receipt number. ALWAYS opens
   // immediately (no confirm/prompt). Crucially it does NOT discard the parchi you
@@ -1607,12 +1880,34 @@ export function AppProvider({ children }) {
     // fully detached from whatever row the parchi we just left ended up with.
   }, [openReceiptNo, flushDraft, blankWorkbench])
 
+  // ── Main-screen action registry — what Ctrl+S / Ctrl+N run ──────────────────
+  // The New/Save BUTTONS live in CustomerEntry, and their click handlers do more
+  // than call newParchi()/saveParchi(): they also own the little Urdu result
+  // toast. So the component registers those EXACT handlers here, and the global
+  // hotkey (src/logic/hotkeys.js) fires them — shortcut and button are literally
+  // one code path, never two that can drift. Nothing registered (CustomerEntry
+  // unmounted, i.e. off the main screen) → the trigger is a silent no-op.
+  const mainActionsRef = useRef({})
+  const registerMainActions = useCallback((actions) => {
+    mainActionsRef.current = actions || {}
+    return () => { mainActionsRef.current = {} }
+  }, [])
+  const triggerSaveParchi = useCallback(() => {
+    const fn = mainActionsRef.current.save
+    if (fn) fn()
+  }, [])
+  const triggerNewParchi = useCallback(() => {
+    const fn = mainActionsRef.current.new
+    if (fn) fn()
+  }, [])
+
   // Stage 1 — one-time fresh start: clear all transactions/receipts, numbering → 1.
   const resetData = useCallback(async () => {
     if (hasApi) await window.api.resetTransactions()
     setReceiptNo(1)
     setSavedFlags(NO_SAVED)
     refresh()
+    try { reportsExportRef.current && reportsExportRef.current() } catch {}
   }, [refresh])
 
   // Reset ONLY کچا سونا لیا data (kacha transactions + their own receipts). Other
@@ -1622,6 +1917,7 @@ export function AppProvider({ children }) {
     if (!hasApi) return { ok: false }
     const res = await window.api.resetKachaGold()
     refresh()
+    try { reportsExportRef.current && reportsExportRef.current() } catch {}
     return res || { ok: true }
   }, [refresh])
 
@@ -1632,6 +1928,7 @@ export function AppProvider({ children }) {
     if (!hasApi) return { ok: false }
     const res = await window.api.resetKachaCounter()
     refresh()
+    try { reportsExportRef.current && reportsExportRef.current() } catch {}
     return res || { ok: true }
   }, [refresh])
 
@@ -1641,6 +1938,7 @@ export function AppProvider({ children }) {
   const addExpense = useCallback(async (e) => {
     if (hasApi) await window.api.addExpense(e)
     refresh()
+    try { reportsExportRef.current && reportsExportRef.current() } catch {}
     return { ok: true }
   }, [refresh])
 
@@ -1650,12 +1948,14 @@ export function AppProvider({ children }) {
   const editExpense = useCallback(async (id, fields) => {
     if (hasApi) await window.api.updateExpense(id, fields)
     refresh()
+    try { reportsExportRef.current && reportsExportRef.current() } catch {}
     return { ok: true }
   }, [refresh])
 
   const removeExpense = useCallback(async (id) => {
     if (hasApi) await window.api.deleteExpense(id)
     refresh()
+    try { reportsExportRef.current && reportsExportRef.current() } catch {}
     return { ok: true }
   }, [refresh])
 
@@ -1665,6 +1965,7 @@ export function AppProvider({ children }) {
     if (!hasApi) return { ok: false }
     const res = await window.api.resetExpenses()
     refresh()
+    try { reportsExportRef.current && reportsExportRef.current() } catch {}
     return res || { ok: true }
   }, [refresh])
 
@@ -1716,12 +2017,14 @@ export function AppProvider({ children }) {
   const editTransaction = useCallback(async (id, fields) => {
     if (hasApi) await window.api.updateTransaction(id, fields)
     refresh()
+    try { reportsExportRef.current && reportsExportRef.current() } catch {}
     return { ok: true }
   }, [refresh])
 
   const removeTransaction = useCallback(async (id) => {
     if (hasApi) await window.api.deleteTransaction(id)
     refresh()
+    try { reportsExportRef.current && reportsExportRef.current() } catch {}
     return { ok: true }
   }, [refresh])
 
@@ -1742,8 +2045,11 @@ export function AppProvider({ children }) {
     const t = { kind: 'udhar', direction, category, note: note || 'قسط/واپسی', meta: { settle: true } }
     if (kind === 'gold') { t.sona_wazan = amt; t.point = 100; t.khalis_sona = amt } else t.cash_amount = amt
     const rno = receiptNo
-    if (hasApi) await window.api.settleTransaction({ receipt_no: rno, customer_id: c.id, date: rates.date, ...t })
+    // entryDate (not rates.date) — a قسط/واپسی recorded today is today's, even if an
+    // old parchi is on screen.
+    if (hasApi) await window.api.settleTransaction({ receipt_no: rno, customer_id: c.id, date: entryDate, ...t })
     refresh()
+    try { reportsExportRef.current && reportsExportRef.current() } catch {}
     // Draft-aware advance (parked drafts occupy their numbers; see saveUdharTxn).
     if (hasApi) {
       const n = await computeNextParchiNo()
@@ -1760,7 +2066,7 @@ export function AppProvider({ children }) {
       setReceiptNo((r) => r + 1)
     }
     return { ok: true, receipt_no: rno }
-  }, [receiptNo, rates.date, refresh, computeNextParchiNo, refreshDraftsCache])
+  }, [receiptNo, entryDate, refresh, computeNextParchiNo, refreshDraftsCache])
 
   const value = {
     screen, setScreen,
@@ -1768,6 +2074,8 @@ export function AppProvider({ children }) {
     receiptNo, setReceiptNo,
     customer, setCustomer, newCustomer, saveCustomer,
     totals, refresh, bump,
+    exportReportsToDrive, // manual "export reports now" (settings test button)
+    scheduleReportsExport, // debounced+guarded trigger for out-of-store commit points (نیا سودا)
     cashDisplay, addExpense, editExpense, removeExpense, resetExpensesData, addAdjustment,
     input, setInput, setWeight,
     overrides, setCell, clearCell, toggleParchi, resetEntry,
@@ -1789,13 +2097,18 @@ export function AppProvider({ children }) {
     hasNextReceipt: receiptBounds.hasNext,
     gotoFirstReceipt, gotoLastReceipt, gotoNextReceipt, gotoPrevReceipt,
     addTransaction,
-    saveParchi, saveUdharTxn, newParchi, resetData, resetKachaData, resetKachaCounter, getReport, getReportGroup1, getKachaReport, getAdjustmentsReport,
+    saveParchi, saveUdharTxn, newParchi,
+    // Ctrl+S / Ctrl+N plumbing — CustomerEntry registers, hotkeys.js triggers.
+    registerMainActions, triggerSaveParchi, triggerNewParchi,
+    resetData, resetKachaData, resetKachaCounter, getReport, getReportGroup1, getKachaReport, getAdjustmentsReport,
     editTransaction, removeTransaction, recordSettle,
     savedFlags, setSavedFlags,
     udharOpen, openUdhar, closeUdhar,
     akhrajatOpen, openAkhrajat, closeAkhrajat,
+    hisabOpen, openHisab, closeHisab,
     printSlips,
     shareSlipWhatsApp,
+    entryDate, // date a NEW standalone entry belongs to (see above) — کھرچہ uses it
     hasApi
   }
 

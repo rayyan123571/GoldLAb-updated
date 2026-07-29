@@ -31,7 +31,7 @@ const INP = `${INP_BASE} text-left`
 const NAME_INP = `${INP_BASE} urdu`
 
 export default function NayaSoda() {
-  const { receiptNo } = useApp() // current parchi number
+  const { receiptNo, scheduleReportsExport } = useApp() // current parchi number
   const [name, setName] = useState('')
   const [rate, setRate] = useState('')
   const [wazan, setWazan] = useState('')
@@ -46,6 +46,14 @@ export default function NayaSoda() {
   // effect only writes once this matches receiptNo, so an in-flight LOAD (which
   // changes the fields) can never be written back onto the wrong parchi.
   const loadedFor = useRef(null)
+  // The form values as they stand in the DB for `loadedFor` (JSON). The persist
+  // effect compares against this and writes NOTHING when they match. Without it,
+  // simply navigating onto a parchi re-wrote (or, for the usual empty form,
+  // re-DELETED) its نیا سودا draft row every single time — and each write makes the
+  // main process rewrite the whole database file, which is what the operator felt
+  // as the delay before the parchi appeared.
+  const loadedSnap = useRef(null)
+  const snapOf = (v) => JSON.stringify([v.name, String(v.rate), String(v.wazan), v.type, v.date])
 
   // Show a status message that auto-hides after 3 seconds (the ✓ never lingers).
   const showMsg = (m) => {
@@ -64,11 +72,15 @@ export default function NayaSoda() {
         d = await window.api.getNayaSodaDraft(receiptNo)
       }
       if (cancelled) return
-      setName(d?.name || '')
-      setRate(d?.rate != null ? String(d.rate) : '')
-      setWazan(d?.wazan != null ? String(d.wazan) : '')
-      setType(d?.type === 'farokht' ? 'farokht' : 'khareed')
-      setDate(d?.date || todayISO())
+      const v = {
+        name: d?.name || '',
+        rate: d?.rate != null ? String(d.rate) : '',
+        wazan: d?.wazan != null ? String(d.wazan) : '',
+        type: d?.type === 'farokht' ? 'farokht' : 'khareed',
+        date: d?.date || todayISO()
+      }
+      setName(v.name); setRate(v.rate); setWazan(v.wazan); setType(v.type); setDate(v.date)
+      loadedSnap.current = snapOf(v) // freshly loaded = already in the DB, nothing to write
       loadedFor.current = receiptNo
     })()
     return () => { cancelled = true }
@@ -79,11 +91,15 @@ export default function NayaSoda() {
   useEffect(() => {
     if (loadedFor.current !== receiptNo) return // a load is in flight — don't write
     if (!window.api || !window.api.saveNayaSodaDraft || receiptNo == null) return
+    const snap = snapOf({ name, rate, wazan, type, date })
+    if (snap === loadedSnap.current) return // unchanged since it was loaded/written
     if (draftTimer.current) clearTimeout(draftTimer.current)
     const empty = !name.trim() && !String(rate).trim() && !String(wazan).trim()
+    const forNo = receiptNo
     draftTimer.current = setTimeout(() => {
-      if (empty) window.api.clearNayaSodaDraft(receiptNo)
-      else window.api.saveNayaSodaDraft(receiptNo, { name, rate, wazan, type, date })
+      if (empty) window.api.clearNayaSodaDraft(forNo)
+      else window.api.saveNayaSodaDraft(forNo, { name, rate, wazan, type, date })
+      if (loadedFor.current === forNo) loadedSnap.current = snap
     }, 400)
   }, [name, rate, wazan, type, date, receiptNo])
 
@@ -103,11 +119,48 @@ export default function NayaSoda() {
       // This parchi's in-progress draft is now committed — drop it, then blank the
       // form for the next entry (date resets to today, قسم to خرید).
       if (window.api.clearNayaSodaDraft && receiptNo != null) await window.api.clearNayaSodaDraft(receiptNo)
-      setName(''); setRate(''); setWazan(''); setType('khareed'); setDate(todayISO())
+      // نیا سودا writes bypass the store, so trigger the Drive report export here
+      // (the بھگتان/بقایا PDFs must refresh too). Debounced + guarded; no-op if off.
+      try { scheduleReportsExport && scheduleReportsExport() } catch {}
+      const blank = { name: '', rate: '', wazan: '', type: 'khareed', date: todayISO() }
+      setName(blank.name); setRate(blank.rate); setWazan(blank.wazan); setType(blank.type); setDate(blank.date)
+      // The draft row is already gone, so the blanked form matches the DB — this
+      // stops the persist effect from firing a redundant clear right after.
+      loadedSnap.current = snapOf(blank)
       showMsg({ ok: true, text: 'محفوظ ہو گیا ✓' })
     } catch (e) {
       showMsg({ ok: false, text: 'محفوظ نہیں ہو سکا' })
     }
+  }
+
+  // Send the CURRENT (unsaved) form values to WhatsApp as text — same route the
+  // نقد / لیب رسید receipts use — WITHOUT saving or clearing the form.
+  const waSend = async () => {
+    const hasData = name.trim() || String(rate).trim() || String(wazan).trim()
+    if (!hasData) { showMsg({ ok: false, text: 'پہلے کچھ درج کریں' }); return }
+    const p = String(date || '').split('-')
+    const dispDate = (p.length === 3 && p[0]) ? `${p[2]}/${p[1]}/${p[0]}` : (date || '-')
+    const qism = type === 'farokht' ? 'فروخت' : 'خرید'
+    const text =
+      `نیا سودا\n` +
+      `نام: ${name || '-'}\n` +
+      `ریٹ: ${rate || '-'}\n` +
+      `وزن: ${wazan || '-'}\n` +
+      `قسم: ${qism}\n` +
+      `تاریخ: ${dispDate}`
+    // Copy the text so the operator can paste it after picking any contact.
+    try { await navigator.clipboard.writeText(text) } catch {}
+    // Same WhatsApp route the receipts use (desktop app → embedded web), empty
+    // mobile so the operator chooses the recipient; wa.me is the dev fallback.
+    try {
+      if (window.api && window.api.openWhatsApp) {
+        const r = await window.api.openWhatsApp({ mobile: '', text })
+        if (r && r.ok) { showMsg({ ok: true, text: 'واٹس ایپ کھل گیا — رابطہ منتخب کر کے پیسٹ کریں' }); return }
+      }
+    } catch {}
+    const url = `https://wa.me/?text=${encodeURIComponent(text)}`
+    if (typeof window !== 'undefined') window.open(url, '_blank')
+    showMsg({ ok: true, text: 'واٹس ایپ کھل گیا — رابطہ منتخب کر کے پیسٹ کریں' })
   }
 
   return (
@@ -171,6 +224,7 @@ export default function NayaSoda() {
           >
             محفوظ کریں
           </button>
+          <button type="button" onClick={waSend} className="abtn abtn-green" title="واٹس ایپ پر بھیجیں">WhatsApp</button>
           {msg && (
             <span className={`urdu text-[12px] font-bold ${msg.ok ? 'text-emerald-700' : 'text-red-600'}`}>{msg.text}</span>
           )}

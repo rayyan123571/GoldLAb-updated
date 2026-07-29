@@ -94,8 +94,16 @@ function FitValue({ value, align = 'right', strong, red, min = 6, fit = false, a
   useLayoutEffect(() => {
     const el = ref.current
     if (!el) return
-    el.style.fontSize = '' // reset to the inherited size before measuring
+    // Reset to the inherited size before measuring — but ONLY when a previous pass
+    // actually shrank this element. An unconditional style write dirties layout for
+    // every field on screen, so each field's following scrollWidth read forced its
+    // own reflow (~100 fields per parchi = ~100 forced reflows on every navigation).
+    // Guarding the write lets the browser answer the reads from one layout pass.
+    if (el.style.fontSize) el.style.fontSize = ''
     if (!doFit || !el.clientWidth) return
+    // Already fits (the overwhelmingly common case) → no measurement loop and, more
+    // importantly, no getComputedStyle call, which is itself a style-recalc trigger.
+    if (el.scrollWidth <= el.clientWidth) return
     let size = parseFloat(getComputedStyle(el).fontSize) || 10
     let guard = 0
     while (el.scrollWidth > el.clientWidth && size > min && guard < 40) {
@@ -516,7 +524,7 @@ function CRow({ right, left }) {
 
 /* 3) ادھار کی رسید — Credit Receipt */
 export function CreditReceipt({ ctx, embed }) {
-  const { customer, receiptNo, rates, bump, hasApi, openReceiptNo,
+  const { customer, receiptNo, rates, bump, hasApi,
     udharGive, udharTake, udharCashGive, udharCashTake, udharComment } = ctx
   const now = useClock()
   const [ledFetched, setLed] = useState({ balance_gold: 0, balance_cash: 0 })
@@ -524,10 +532,19 @@ export function CreditReceipt({ ctx, embed }) {
     // ctx.ledger injected (e.g. the customer statement passes each parchi's OWN
     // running/cumulative balance) → use it as-is, never fetch the live grand total.
     if (ctx.ledger) return
-    if (hasApi && customer.id)
-      window.api.getCustomerLedger(customer.id).then((l) => setLed(l || { balance_gold: 0, balance_cash: 0 }))
-    else setLed({ balance_gold: 0, balance_cash: 0 })
-  }, [customer.id, bump, hasApi, ctx.ledger])
+    if (hasApi && customer.id) {
+      // Balance of the parchis numbered BEFORE this one — i.e. سابقہ itself, straight
+      // from the DB (see the getCustomerBalance note in db.cjs). Keyed on the parchi's
+      // own displayed number, so it reads the same whether this parchi is a fresh
+      // unsaved one, just saved, or navigated back to later. Only the two balances are
+      // read (this receipt shows nothing else from the ledger); getCustomerLedger is
+      // the fallback for an older preload.
+      const read = window.api.getCustomerBalance
+        ? window.api.getCustomerBalance(customer.id, receiptNo)
+        : window.api.getCustomerLedger(customer.id, receiptNo)
+      read.then((l) => setLed(l || { balance_gold: 0, balance_cash: 0 }))
+    } else setLed({ balance_gold: 0, balance_cash: 0 })
+  }, [customer.id, bump, hasApi, ctx.ledger, receiptNo])
   const led = ctx.ledger || ledFetched
 
   // Live ادھار transaction figures — same ratti-scale formula as the panel's
@@ -555,21 +572,19 @@ export function CreditReceipt({ ctx, embed }) {
   // This transaction's net (give − take); previous ledger balance + net = new باقی.
   const netGold = (gGive?.khalis || 0) - (gTake?.khalis || 0)
   const netCash = cGive - cTake
-  // Add the LIVE form entries on top of the ledger balance ONLY while composing a
-  // brand-new, unsaved parchi (openReceiptNo == null). Once the parchi is saved —
-  // or when an already-saved parchi is re-opened/navigated to — those same entries
-  // are ALREADY part of the ledger balance, so adding them again is what made the
-  // receipt value DOUBLE after Save. In that case the balance alone is the total.
-  const composingNew = openReceiptNo == null
-  // Previous balance = ledger balance MINUS this parchi's own net, but only when
-  // this parchi is already in the ledger (saved / reopened / navigated to). While
-  // composing a brand-new unsaved parchi the ledger does NOT include it yet, so
-  // previous = ledger as-is. This parchi's exact ledger contribution == netGold /
-  // netCash (same sign + rate-independent khalis/cash as getCustomerLedger).
-  const prevGold = (led?.balance_gold || 0) - (composingNew ? 0 : netGold)
-  const prevCash = (led?.balance_cash || 0) - (composingNew ? 0 : netCash)
-  // Final = previous + this parchi's net. Same final numbers as before (no
-  // doubling), but now سابقہ + باقی = final always reconciles.
+  // سابقہ = the ledger with THIS parchi left out, so it is already "what the customer
+  // owed before this parchi" — no arithmetic, no assumption. It used to be derived as
+  // (full balance − this parchi's live form net), which silently assumed the ledger
+  // already contained exactly what the form shows. It doesn't the moment you type a
+  // new entry onto an ALREADY-SAVED parchi: the ledger has no such row yet, so the
+  // subtraction ran backwards and سابقہ went negative on a customer's first receipt
+  // (چاندی دی 34 → سابقہ −34). And on an old parchi the live total still held every
+  // LATER parchi, so سابقہ drifted away from the printed paper. The parchi is
+  // excluded server-side instead (getCustomerLedger's beforeReceiptNo).
+  const prevGold = led?.balance_gold || 0
+  const prevCash = led?.balance_cash || 0
+  // Final = previous + this parchi's net. Adding the live form net is now always
+  // right (never double-counts) precisely because prev never contains this parchi.
   // Shop convention: net > 0 -> customer owes YOU -> "لینا"; net < 0 -> "دینا".
   const finalGold = prevGold + netGold
   const finalCash = prevCash + netCash

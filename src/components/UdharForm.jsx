@@ -1,10 +1,16 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { useApp } from '../state/store.jsx'
+import { useApp, WA_REMINDER_DEFAULT } from '../state/store.jsx'
 import { fmtMoney, fmtNum, gramsToTMR } from '../logic/units.js'
 import { computeTable, buildLabReceipt } from '../logic/purity.js'
-import { RecoveryReceipt, LabReceipt, CreditReceipt, CashReceipt } from './Receipts.jsx'
+import { CreditReceipt } from './Receipts.jsx'
 import DateField from './DateField.jsx'
+import GhostNameInput from './GhostNameInput.jsx'
 import NayaSodaReport from './NayaSodaReport.jsx'
+
+// One skin for both customer filter boxes (کوڈ / نام). GhostNameInput's ghost
+// mirror wears the SAME classes as its input, so these box metrics have to live
+// in one constant — two copies and the ghost text drifts out of alignment.
+const FILTER_INPUT = 'w-full border border-gray-400 bg-white text-[15px] font-bold px-2 py-1.5 rounded-sm focus:outline-none focus:ring-1 focus:ring-blue-500'
 
 // ─── Report buttons, three groups. flow 'in' = INTO shop (green), 'out' = OUT (red)
 const GROUP1 = [
@@ -44,6 +50,41 @@ const goldVal = (r) => Number(r.total_khalis ?? r.khalis_sona) || 0
 // entries point is always 100, so wazan == khalis and this matches the old display.
 const wazanVal = (r) => Number(r.total_wazan ?? r.sona_wazan) || goldVal(r)
 const cashVal = (r) => Number(r.total_cash ?? r.cash_amount) || 0
+
+// {رقم} for the واٹس ایپ یاد دہانی message. Built from the SAME value and the SAME
+// helper the row on screen is rendered from — goldVal(r) → gramsToTMR() is the very
+// call goldBalanceColumns() makes for its تولہ / ماشہ cells, and cashVal(r) → fmtMoney
+// is what the رقم cell shows. So the message the customer receives reads exactly what
+// the shopkeeper is looking at. No conversion math is re-derived here.
+//
+// ONLY what this report actually prints: تولہ and ماشہ. رتی is deliberately left out —
+// this balance report has no رتی column (goldBalanceColumns drops it), so quoting one
+// would tell the customer a figure the shopkeeper cannot see on his own screen.
+// A zero component is dropped (5 تولہ, never 5 تولہ 0 ماشہ). Grams are the fallback if
+// both round away — the eps filter in _netBalanceReport means that should never
+// reach a row.
+// Fill the یاد دہانی template. {رقم} is the ONLY placeholder — the message addresses
+// the customer as محترم and never carries his name. A {نام} left behind in a template
+// edited before that was settled is REMOVED, not filled: dropping it keeps the name
+// out (which is the point) and also stops a raw "{نام}" reaching the customer. The
+// space/comma tidy-up is what stops "محترم {نام}،" from going out as "محترم ،".
+// Exported so the settings preview shows exactly what will be sent.
+export const fillReminder = (template, amountText) =>
+  String(template || '')
+    .split('{نام}').join('')
+    .split('{رقم}').join(amountText)
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\s+([،۔,.])/g, '$1')
+    .trim()
+
+const reminderAmountText = (r, gold) => {
+  if (!gold) return `${fmtMoney(cashVal(r))} روپے`
+  const { tola, masha } = gramsToTMR(goldVal(r))
+  const parts = []
+  if (tola) parts.push(`${tola} تولہ`)
+  if (masha) parts.push(`${masha} ماشہ`)
+  return parts.length ? parts.join(' ') : `${fmtNum(goldVal(r))} گرام`
+}
 
 // ═══ REPORT COLUMN CONFIG — edit here to change columns per report. ═══
 const goldColumns = ({ parchi = false, date = false } = {}) => {
@@ -228,7 +269,10 @@ export default function UdharForm({ open, onClose }) {
       const res = (hasApi && fn)
         ? await fn(side, { ...customerFilter() })
         : await getReportGroup1({ category: a.category, ...customerFilter() })
-      setReport({ group: 1, kind: a.kind, gold: a.kind === 'gold', rows: res.rows || [], columns: a.kind === 'gold' ? goldBalanceColumns() : cashColumns({}), title: a.label, meta: { customer: customerLabel(), dateNote: 'تمام تواریخ (بیلنس)' } })
+      // `side` is carried on the report so the یاد دہانی column can appear on the
+      // two RECEIVABLE balance reports only ('lena'). No other report sets it, so
+      // the column is structurally impossible anywhere else.
+      setReport({ group: 1, side, kind: a.kind, gold: a.kind === 'gold', rows: res.rows || [], columns: a.kind === 'gold' ? goldBalanceColumns() : cashColumns({}), title: a.label, meta: { customer: customerLabel(), dateNote: 'تمام تواریخ (بیلنس)' } })
     } else if (d.type === 'g2') {
       const a = d.a
       // Date-RANGE report via the shared From/To fields. Blank dates keep the
@@ -261,11 +305,26 @@ export default function UdharForm({ open, onClose }) {
       // kind/category but NOT lab detail — that lives in the receipt payload).
       const rnos = [...new Set(rows.map((r) => r.receipt_no).filter((n) => n != null))]
       const snapshots = {}
+      // Each parchi's سابقہ — the balance of the parchis numbered BEFORE it —
+      // fetched ONCE here, from the DB, by the same call the main screen makes. It
+      // is handed to the receipt so it renders synchronously: a per-panel fetch
+      // would leave every number at 0 for a moment and flash on each re-render.
+      // Not date-filtered (unlike `rows`), so a filtered statement still shows the
+      // سابقہ that was printed on the paper. Keyed per parchi's OWN customer, since
+      // a name filter can match more than one.
+      const ledgers = {}
       if (hasApi && rnos.length) {
-        const fetched = await Promise.all(rnos.map((n) => window.api.getReceiptByNo(n).catch(() => null)))
-        rnos.forEach((n, i) => { snapshots[n] = fetched[i] })
+        const custOf = {}
+        for (const r of rows) if (r.receipt_no != null && custOf[r.receipt_no] == null) custOf[r.receipt_no] = r.customer_id
+        const [fetched, leds] = await Promise.all([
+          Promise.all(rnos.map((n) => window.api.getReceiptByNo(n).catch(() => null))),
+          Promise.all(rnos.map((n) => (custOf[n] != null
+            ? window.api.getCustomerLedger(custOf[n], n).catch(() => null)
+            : null)))
+        ])
+        rnos.forEach((n, i) => { snapshots[n] = fetched[i]; ledgers[n] = leds[i] })
       }
-      const parchis = groupParchis(rows, snapshots, rates, hasApi)
+      const parchis = groupParchis(rows, snapshots, rates, hasApi, ledgers)
       setReport({ group: 3, rows, parchis, meta: { customer: customerLabel(), from: from || 'ابتدا', to: to || 'آج تک' } })
     } else if (d.type === 'kacha') {
       // کچا سونا لیا — per-customer aggregate (no customer filter = all customers).
@@ -314,11 +373,34 @@ export default function UdharForm({ open, onClose }) {
   const saveEdit = async (id, fields) => { await editTransaction(id, fields); setEditRow(null); reload() }
 
   // Code + name dropdowns are kept in sync by the customer id.
-  const onPickCustomer = (e) => {
-    const id = e.target.value
-    const c = customers.find((x) => String(x.id) === id)
-    setCustCode(id)
+  // نام typed (or ghost-accepted). Resolve it to a customer CODE only when exactly
+  // ONE saved customer carries that name — then the report filters on that id,
+  // which is exact. Two customers can share a name, so adopting the first id would
+  // quietly report the wrong person's ledger; leaving the code empty keeps it a
+  // name search and both appear. A partial name stays a search too — that is the
+  // point of typing.
+  const onTypeCustomerName = (v) => {
+    setCustName(v)
+    const t = v.trim().toLowerCase()
+    const exact = t ? customers.filter((c) => String(c.name || '').trim().toLowerCase() === t) : []
+    setCustCode(exact.length === 1 ? String(exact[0].id) : '')
+  }
+
+  // کوڈ typed (or picked). Digits only — a code is a number. Mirror the owner's
+  // name into the نام box so the two always describe the same customer.
+  const onTypeCustomerCode = (v) => {
+    const code = String(v || '').replace(/\D/g, '')
+    setCustCode(code)
+    const c = customers.find((x) => String(x.id) === code)
     setCustName(c ? c.name : '')
+  }
+
+  // Enter in either filter box runs the same report as the کسٹمر کی تفصیلی رسید
+  // button, so a customer can be looked up without reaching for the mouse.
+  const onFilterEnter = (e) => {
+    if (e.key !== 'Enter') return
+    e.preventDefault()
+    loadReport({ type: 'g3' })
   }
 
   // ── The ORIGINAL 8 buttons in a 2×4 grid (DOM order = RTL right col then left).
@@ -385,17 +467,37 @@ export default function UdharForm({ open, onClose }) {
                 <DateField label="To Date:" iso={to} setIso={setTo} />
                 <label className="flex items-center gap-2">
                   <span className="urdu text-[14px] font-bold text-black w-[120px] shrink-0">کسٹمر کا کوڈ :</span>
-                  <select className="flex-1 min-w-0 border border-gray-400 bg-white text-[15px] font-bold px-2 py-1.5 rounded-sm focus:outline-none focus:ring-1 focus:ring-blue-500" value={custCode} onChange={onPickCustomer}>
-                    <option value="">—</option>
-                    {customers.map((c) => <option key={c.id} value={c.id}>{c.id}</option>)}
-                  </select>
+                  {/* Type a code or pick one; the list shows each code with its owner's
+                      name. Digits only, LTR like every other number in the app. */}
+                  <input
+                    list="udhar-customer-codes"
+                    value={custCode}
+                    onChange={(e) => onTypeCustomerCode(e.target.value)}
+                    onKeyDown={onFilterEnter}
+                    dir="ltr"
+                    inputMode="numeric"
+                    className={FILTER_INPUT}
+                  />
+                  <datalist id="udhar-customer-codes">
+                    {customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                  </datalist>
                 </label>
                 <label className="flex items-center gap-2">
                   <span className="urdu text-[14px] font-bold text-black w-[120px] shrink-0">کسٹمر کا نام :</span>
-                  <select className="flex-1 min-w-0 border border-gray-400 bg-white text-[15px] font-bold px-2 py-1.5 rounded-sm focus:outline-none focus:ring-1 focus:ring-blue-500" value={custCode} onChange={onPickCustomer}>
-                    <option value="">—</option>
-                    {customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-                  </select>
+                  {/* The app's own customer-name control (same as the main screen and
+                      the customer form): inline ghost completion of a saved name,
+                      Tab/→ accepts. dir="auto" so the caret and the text run the way
+                      the NAME does — Latin left-to-right, Urdu right-to-left — instead
+                      of forcing the panel's RTL onto an English name. */}
+                  <GhostNameInput
+                    value={custName}
+                    onChange={(e) => onTypeCustomerName(e.target.value)}
+                    onKeyDown={onFilterEnter}
+                    hasApi={hasApi}
+                    dir="auto"
+                    wrapperClassName="flex-1 min-w-0"
+                    inputClassName={`${FILTER_INPUT} text-start`}
+                  />
                 </label>
                 <button
                   type="button"
@@ -429,7 +531,8 @@ export default function UdharForm({ open, onClose }) {
       </div>
 
       {editRow && <EditModal row={editRow} onSave={saveEdit} onClose={() => setEditRow(null)} />}
-      {sodaStatus && <NayaSodaReport status={sodaStatus} from={from} to={to} onClose={() => setSodaStatus(null)} />}
+      {/* بھگتان / بقایا سودا: NO date filter — always show ALL entries (null from/to). */}
+      {sodaStatus && <NayaSodaReport status={sodaStatus} from={null} to={null} onClose={() => setSodaStatus(null)} />}
     </div>
   )
 }
@@ -558,6 +661,7 @@ function ThermalReceipt({ report }) {
 
 // ─── Report view: group 1/2 table or group 3 statement, + print/PDF ───────────
 function ReportView({ report, total, onBack, onEdit, onDelete }) {
+  const { rates } = useApp() // یاد دہانی template lives in settings
   const [note, setNote] = useState('')
   const [thermal, setThermal] = useState(true) // default to the thermal roll layout
   if (!report) return null
@@ -572,6 +676,29 @@ function ReportView({ report, total, onBack, onEdit, onDelete }) {
   // The statement (کسٹمر کی تفصیلی رسید) is ALWAYS the wide A4 layout — never thermal.
   const useThermal = thermal && !isKacha && !isStatement && !isNaqad && !isAdjust
   const canRowEdit = !isKacha && !isNaqad && !isAdjust && !report.noActions && (report.rows || []).some((r) => r.id != null)
+
+  // واٹس ایپ یاد دہانی — the two RECEIVABLE balance reports only (تیزابی لینا ہے /
+  // رقم لینی ہے). `side` is set by the g1 branch alone, so no g2 range report, کچا,
+  // نیا سودا, روزنامچہ, statement or the دینا side can ever satisfy this.
+  const isLenaBalance = report.group === 1 && report.side === 'lena'
+  const sendReminder = async (r, amountText) => {
+    const template = String((rates && rates.whatsapp_reminder_text) || WA_REMINDER_DEFAULT)
+    const text = fillReminder(template, amountText)
+    // The SAME bridge the receipt-share flow uses — number normalization and the
+    // desktop/web routing all live in the main process. This only OPENS the chat
+    // with the text filled in; the shopkeeper presses Send himself.
+    if (hasApiFn() && window.api.openWhatsApp) {
+      try {
+        const res = await window.api.openWhatsApp({ mobile: r.mobile, text })
+        if (res && res.ok) return
+      } catch { /* fall through to the browser link */ }
+    }
+    const num = String(r.mobile || '').replace(/[^0-9]/g, '')
+    if (typeof window !== 'undefined') window.open(`https://wa.me/${num}?text=${encodeURIComponent(text)}`, '_blank')
+  }
+  const reminder = isLenaBalance
+    ? { onSend: sendReminder, amountText: (r) => reminderAmountText(r, !!report.gold) }
+    : null
 
   // The statement forces the wide A4 page; other reports honour the thermal toggle.
   const applyPrintMode = (on) => {
@@ -624,6 +751,23 @@ function ReportView({ report, total, onBack, onEdit, onDelete }) {
             تھرمل ({THERMAL_PAPER_MM}mm)
           </button>
         )}
+        {/* Shortcut, "لینا ہے" balance reports only. The یاد دہانی column lives in the
+            wide table, and these reports open on the thermal preview by DEFAULT (left
+            deliberately unchanged — the habit of opening and printing straight away
+            must not shift). Without this the button would exist where nobody looks.
+            It flips the SAME thermal toggle above and nothing else: no default, no
+            print behaviour, no report data is touched. Once the table is showing the
+            shortcut has done its job, so it hides itself. */}
+        {isLenaBalance && thermal && (
+          <button
+            type="button"
+            onClick={() => setThermal(false)}
+            title="یاد دہانی کے بٹن دیکھنے کے لیے تفصیلی جدول کھولیں"
+            className="urdu text-[12px] font-semibold inline-flex items-center gap-1.5 text-white bg-emerald-600 border border-emerald-600 rounded-md px-3 py-1.5 hover:bg-emerald-700 active:bg-emerald-800 transition-colors"
+          >
+            <WaGlyph /> واٹس ایپ یاد دہانی
+          </button>
+        )}
         <div className="flex-1" />
         {note && <span className="urdu text-[11px] text-emerald-600">{note}</span>}
         <button type="button" onClick={doPrint} className="urdu text-[12px] font-semibold text-gray-700 border border-gray-300 rounded-md px-3 py-1.5 hover:bg-gray-100 transition-colors">پرنٹ 🖨</button>
@@ -666,7 +810,7 @@ function ReportView({ report, total, onBack, onEdit, onDelete }) {
             ) : isStatement ? (
               <StatementView parchis={report.parchis} rows={report.rows} />
             ) : (
-              <TableReport columns={report.columns} rows={report.rows} total={total} gold={report.gold} canRowEdit={canRowEdit} onEdit={onEdit} onDelete={onDelete} />
+              <TableReport columns={report.columns} rows={report.rows} total={total} gold={report.gold} canRowEdit={canRowEdit} onEdit={onEdit} onDelete={onDelete} reminder={reminder} />
             )}
           </div>
         </>
@@ -685,7 +829,40 @@ function RowActions({ r, onEdit, onDelete }) {
   )
 }
 
-function TableReport({ columns, rows, total, gold, canRowEdit, onEdit, onDelete }) {
+// WhatsApp mark, inline so nothing is fetched and print never sees a broken glyph.
+const WaGlyph = () => (
+  <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor" aria-hidden="true">
+    <path d="M12.04 2C6.58 2 2.13 6.45 2.13 11.91c0 1.75.46 3.45 1.32 4.95L2 22l5.25-1.38a9.9 9.9 0 0 0 4.79 1.22h.01c5.46 0 9.91-4.45 9.91-9.91C21.96 6.45 17.5 2 12.04 2zm0 18.18h-.01a8.2 8.2 0 0 1-4.19-1.15l-.3-.18-3.11.82.83-3.04-.2-.31a8.22 8.22 0 0 1-1.26-4.41c0-4.54 3.7-8.23 8.24-8.23 2.2 0 4.27.86 5.83 2.41a8.19 8.19 0 0 1 2.41 5.83c0 4.54-3.7 8.24-8.24 8.24zm4.52-6.16c-.25-.12-1.47-.72-1.69-.81-.23-.08-.39-.12-.56.13-.16.24-.64.8-.79.97-.14.16-.29.18-.54.06-.25-.12-1.05-.39-1.99-1.23-.74-.66-1.24-1.47-1.38-1.72-.14-.25-.02-.38.11-.5.11-.11.25-.29.37-.43.12-.15.16-.25.25-.41.08-.17.04-.31-.02-.43-.06-.12-.56-1.34-.76-1.84-.2-.48-.4-.42-.56-.43h-.48c-.16 0-.43.06-.65.31-.22.25-.85.83-.85 2.03s.87 2.35.99 2.51c.12.16 1.71 2.61 4.15 3.66.58.25 1.03.4 1.39.51.58.19 1.11.16 1.53.1.47-.07 1.47-.6 1.68-1.18.21-.58.21-1.07.14-1.18-.06-.11-.22-.17-.47-.29z" />
+  </svg>
+)
+
+// یاد دہانی cell. A customer with no stored mobile keeps the button's shape but
+// greyed and inert — the shopkeeper SEES the number is missing and can go add it,
+// which hiding the button would never tell him. Fixed 24px height so a row with a
+// button is exactly as tall as one without: the table's geometry never shifts.
+function ReminderButton({ r, amountText, onSend }) {
+  const mobile = String(r.mobile || '').replace(/[^0-9]/g, '')
+  const base = 'inline-flex items-center justify-center gap-1 h-[24px] px-2 rounded urdu text-[11px] font-semibold whitespace-nowrap'
+  if (!mobile) {
+    return (
+      <span title="موبائل نمبر موجود نہیں" className={`${base} bg-gray-100 text-gray-400 border border-gray-200 cursor-not-allowed select-none`}>
+        <WaGlyph /> یاد دہانی
+      </span>
+    )
+  }
+  return (
+    <button
+      type="button"
+      title={`${r.customer_name || 'کسٹمر'} کو واٹس ایپ پر یاد دہانی بھیجیں`}
+      onClick={() => onSend(r, amountText)}
+      className={`${base} text-white bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 transition-colors`}
+    >
+      <WaGlyph /> یاد دہانی
+    </button>
+  )
+}
+
+function TableReport({ columns, rows, total, gold, canRowEdit, onEdit, onDelete, reminder }) {
   const totalIdx = columns.findIndex((c) => c.total)
   const totalText = gold ? `${fmtNum(total)} گرام` : fmtMoney(total)
   const totalLabel = gold ? 'کل خالص سونا' : 'کل رقم'
@@ -701,6 +878,9 @@ function TableReport({ columns, rows, total, gold, canRowEdit, onEdit, onDelete 
         <tr className="bg-slate-100 text-gray-700 border-b-2 border-slate-300 urdu">
           {columns.map((c) => <th key={c.label} className={`px-3 py-2 border-l border-gray-200 ${c.num ? 'text-center' : 'text-right'}`}>{c.label}</th>)}
           {canRowEdit && <th className="no-print px-3 py-2 text-center w-[80px]">ایکشن</th>}
+          {/* no-print — same mechanism the ایکشن column already uses, so neither the
+              printed page nor the exported PDF ever shows this column. */}
+          {reminder && <th className="no-print px-2 py-2 text-center w-[100px]">یاد دہانی</th>}
         </tr>
       </thead>
       <tbody>
@@ -710,6 +890,11 @@ function TableReport({ columns, rows, total, gold, canRowEdit, onEdit, onDelete 
               <td key={c.label} className={`px-3 py-1.5 border-l border-gray-100 ${c.num ? 'text-center tabular-nums' : 'text-right urdu'}`} dir={c.num ? 'ltr' : 'rtl'}>{c.get(r)}</td>
             ))}
             {canRowEdit && <td className="no-print px-3 py-1.5 text-center"><RowActions r={r} onEdit={onEdit} onDelete={onDelete} /></td>}
+            {reminder && (
+              <td className="no-print px-2 py-1 text-center">
+                <ReminderButton r={r} amountText={reminder.amountText(r)} onSend={reminder.onSend} />
+              </td>
+            )}
           </tr>
         ))}
       </tbody>
@@ -726,6 +911,7 @@ function TableReport({ columns, rows, total, gold, canRowEdit, onEdit, onDelete 
             return <td key={c.label} className="px-3 py-2.5" />
           })}
           {canRowEdit && <td className="no-print" />}
+          {reminder && <td className="no-print" />}
         </tr>
       </tfoot>
     </table>
@@ -828,8 +1014,9 @@ const labFromPayload = (payload, baseRates = {}) => {
 // reconstruction store.jsx loadReceipt does — nقد/ادھار entries are rebuilt from
 // the transaction ROWS (source of truth), the purity rows from input+overrides+
 // rates — but assembled into a plain object instead of React state, so the real
-// <CashReceipt/> <CreditReceipt/> <LabReceipt/> <RecoveryReceipt/> render the
-// parchi EXACTLY as it looks on the main page. No formula is touched.
+// <CreditReceipt/> renders the parchi's ادھار کی رسید EXACTLY as it looks on the
+// main page. No formula is touched. (This view shows the ادھار رسید only; the
+// parchi's other receipts stay saved and still open from the main screen.)
 const blankGold = () => ({ wazan: '', point: '100', rate: '' })
 function buildParchiCtx({ payload, snapRows, receiptNo, baseRates, hasApi, ledger }) {
   const rates = { ...(baseRates || {}), ...(payload.rates || {}) }
@@ -871,12 +1058,12 @@ function buildParchiCtx({ payload, snapRows, receiptNo, baseRates, hasApi, ledge
     ujratKaSona: sb.ujratKaSona != null ? sb.ujratKaSona : true,
     sonaDiya: sb.sonaDiya ?? '', cashDiya: sb.cashDiya ?? '',
     savedFlags: { naqad: true, udhar: true, lab: true, wasooli: true },
-    // A saved (not brand-new) parchi: openReceiptNo === receiptNo makes
-    // CreditReceipt read the ledger balance instead of re-adding live entries —
-    // identical to reopening the parchi on the main screen.
-    openReceiptNo: receiptNo,
-    // This parchi's OWN running (cumulative) ledger balance — so the ادھار receipt
-    // shows this parchi's باقی دینا/لینا, not the customer's grand total.
+    // This parchi's سابقہ, already fetched from the DB by the caller
+    // (getCustomerLedger(customer_id, receiptNo) — the balance of the parchis
+    // numbered BEFORE this one, exactly what the main screen shows and what was
+    // printed on the paper). Passing it in means the receipt renders it on the
+    // first paint instead of fetching per panel and flashing 0. It is the
+    // database's own answer — never a balance re-derived here.
     ledger,
     hasApi, bump: 0, refresh: () => {}, printSlips: () => {}
   }
@@ -885,7 +1072,7 @@ function buildParchiCtx({ payload, snapRows, receiptNo, baseRates, hasApi, ledge
 // Group the flat transaction rows by receipt_no (rows arrive ordered by date,
 // receipt_no, id — first-seen order is preserved). `snapshots[rno]` is the
 // getReceiptByNo result for that parchi (may be null for a very old row).
-function groupParchis(rows, snapshots = {}, baseRates = {}, hasApi = false) {
+function groupParchis(rows, snapshots = {}, baseRates = {}, hasApi = false, ledgers = {}) {
   const order = []
   const map = new Map()
   for (const r of rows || []) {
@@ -894,11 +1081,6 @@ function groupParchis(rows, snapshots = {}, baseRates = {}, hasApi = false) {
     if (!map.has(key)) { map.set(key, []); order.push(key) }
     map.get(key).push(r)
   }
-  // Running (cumulative) ledger balance PER CUSTOMER, accumulated in chronological
-  // order (rows arrive date/receipt-ordered). Each parchi is given the balance
-  // THROUGH itself — same sign convention as getCustomerLedger — so its ادھار
-  // receipt shows that parchi's own باقی دینا/لینا instead of the grand total.
-  const acc = new Map() // customer_id -> { gold, cash }
   return order.map((rno) => {
     const prows = map.get(rno)
     const snap = snapshots[rno] || null
@@ -906,13 +1088,6 @@ function groupParchis(rows, snapshots = {}, baseRates = {}, hasApi = false) {
     const snapRows = (snap && snap.rows) || prows
     const entries = payload.entries || {}
     const first = prows[0]
-    const pnet = statementTotals(prows)
-    const cid = first.customer_id
-    const a = acc.get(cid) || { gold: 0, cash: 0 }
-    a.gold += pnet.netGold
-    a.cash += pnet.netCash
-    acc.set(cid, a)
-    const ledger = { balance_gold: a.gold, balance_cash: a.cash }
     const naqadRows = prows.filter((r) => NAQAD_CATS.includes(r.category))
     const udharRows = prows.filter((r) => UDHAR_CATS.includes(r.category))
     const kachaRows = prows.filter((r) => r.category === 'kacha_gold_take')
@@ -927,7 +1102,7 @@ function groupParchis(rows, snapshots = {}, baseRates = {}, hasApi = false) {
       // وصولی accompanies the lab flow (same as the main screen's LeftReceipts).
       wasooli: !!labInfo
     }
-    const ctx = buildParchiCtx({ payload, snapRows, receiptNo: rno, baseRates, hasApi, ledger })
+    const ctx = buildParchiCtx({ payload, snapRows, receiptNo: rno, baseRates, hasApi, ledger: ledgers[rno] })
     return {
       receipt_no: rno,
       date: first.date,
@@ -1029,10 +1204,11 @@ function ParchiReceipts({ p, thermal }) {
   const DH = 456
   return (
     <div className={`flex ${thermal ? 'flex-col' : 'flex-row flex-wrap'} gap-2 justify-start`} dir="ltr">
-      {p.types.naqad && <Tile h={DH}><CashReceipt ctx={ctx} embed /></Tile>}
+      {/* کسٹمر تفصیل shows the ادھار کی رسید ONLY. A parchi's نقد / لیب / وصولی
+          receipts are still saved and still open from the main screen — this view
+          just doesn't render them. Its totals were always ادھار-only (UDHAR_CATS),
+          so the numbers on this page already matched what is shown here. */}
       {p.types.udhar && <Tile h={DH}><CreditReceipt ctx={ctx} embed /></Tile>}
-      {p.types.lab && <Tile h={DH}><LabReceipt row={p.labRow} lab={p.lab} ctx={ctx} embed /></Tile>}
-      {p.types.wasooli && <Tile h={DH}><RecoveryReceipt row={p.labRow} lab={p.lab} ctx={ctx} embed /></Tile>}
       {/* No main-page receipt exists for a bare raw-gold intake — show its figure
           so nothing is lost, without mislabeling it. */}
       {!any && p.kachaRows.map((r) => (
@@ -1054,7 +1230,9 @@ function ParchiBlock({ p, thermal }) {
     <div className="border-2 border-slate-300 rounded-lg bg-white overflow-hidden text-[12px]">
       <div className="flex items-center justify-between gap-2 bg-slate-100 border-b border-slate-200 px-3 py-2" dir="rtl">
         <span className="urdu font-bold text-gray-800 whitespace-nowrap">پرچی نمبر {p.receipt_no}</span>
-        <TypeBadges types={p.types} small={thermal} />
+        {/* ادھار only — this view shows the ادھار رسید, so a نقد / لیب / وصولی
+            badge here would name a receipt that is deliberately not on the page. */}
+        <TypeBadges types={{ udhar: p.types.udhar }} small={thermal} />
         <span className="tabular-nums text-gray-500 whitespace-nowrap" dir="ltr">{isoToDisp(p.date)}</span>
       </div>
       <div className="px-3 py-2 flex flex-col gap-2">
