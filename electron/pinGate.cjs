@@ -38,8 +38,44 @@ function safeEqual(a, b) {
 
 const isRecoveryCode = (code) => safeEqual(String(code || '').trim(), RECOVERY_CODE)
 
+/* ─────────────────────────────────────────────────────────────────────────────
+ *  DEVELOPER PIN — guards ڈیفالٹ سیٹنگز → پرچی ہیڈر (the shop identity printed
+ *  on every slip). This is NOT the shopkeeper's pin.
+ *
+ *  Two different locks, on purpose:
+ *    • settings.pin_hash — the ٹوٹل panel. The SHOPKEEPER picks it and may change
+ *      it whenever he likes.
+ *    • the digest below — the شاپ ہیڈر. Fixed, known only to the developer, and
+ *      completely unaffected when the shopkeeper changes his own pin. Otherwise
+ *      he could unlock the header himself and print slips under another shop's
+ *      name, which is the whole point of locking it.
+ *
+ *  Stored as a salted PBKDF2 digest with the SAME parameters as the shopkeeper's
+ *  pin, so the raw digits appear nowhere in the source or in the shipped bundle.
+ *  The salt is unique to THIS app — the same pin therefore produces a different
+ *  digest in each build, so comparing two builds reveals nothing.
+ *  To change it: hash the new digits with makeSalt()/hashPin() and paste the pair
+ *  here — never the digits themselves.
+ *
+ *  Worth knowing: a 4-digit pin has only 10,000 possibilities, so anyone who
+ *  extracts this file could brute-force the digest offline. It stops the
+ *  shopkeeper, not a determined attacker with the file — the same limit the
+ *  shopkeeper's own pin has always had.
+ * ───────────────────────────────────────────────────────────────────────────── */
+const DEV_PIN_SALT = 'aa2a9d11e0d3f2e53f22e7d2d3e67b31'
+const DEV_PIN_HASH = '2bf08ea54c78bd1f7a41f473ffa5bf5e08ac25feb180f30df2e0b7d7e58f03a1'
+
+// The developer pin, or the recovery code (which opens anything the pin does).
+// Same constant-time compare as every other check here.
+const isDevPin = (code) => {
+  const raw = String(code == null ? '' : code).trim()
+  if (isRecoveryCode(raw)) return true
+  if (!isValidPin(raw)) return false
+  return safeEqual(hashPin(raw, DEV_PIN_SALT), DEV_PIN_HASH)
+}
+
 // Owner pin rule: EXACTLY 4 digits. Enforced BOTH here (authoritative) and in
 // the UI's four digit cells.
 const isValidPin = (pin) => /^\d{4}$/.test(String(pin || ''))
 
-module.exports = { hashPin, makeSalt, safeEqual, isRecoveryCode, isValidPin }
+module.exports = { hashPin, makeSalt, safeEqual, isRecoveryCode, isValidPin, isDevPin }

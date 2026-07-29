@@ -431,6 +431,7 @@ function shopHeaderHtml(shop) {
   const name = esc(s.shop_name)
   const tagline = esc(s.shop_tagline)
   const owner = esc(s.shop_owner)
+  const owner2 = esc(s.shop_owner2)
   const p1 = esc(s.shop_phone1)
   const p2 = esc(s.shop_phone2)
   const p3 = esc(s.shop_phone3)
@@ -449,7 +450,19 @@ function shopHeaderHtml(shop) {
       (owner && p1 ? '&nbsp;&nbsp;' : '') +
       (p1 ? '<span dir="ltr">' + p1 + '</span>' : '') + '</div>'
   }
-  if (p2 || p3) {
+  // A SECOND owner, when filled in, pairs with phone2 on its own line and pushes
+  // phone3 down alone — the preview's branch at native size. It reuses the
+  // owner/phone1 line's style, NOT the Arial phone style below: Arial renders Urdu
+  // badly, and this line carries a name. Blank shop_owner2 skips the branch and
+  // the original phone2+phone3 line is emitted byte-for-byte as before.
+  if (owner2) {
+    h += '<div style="font-size:22px;font-weight:600;line-height:1.8">' + owner2 +
+      (p2 ? '&nbsp;&nbsp;' : '') +
+      (p2 ? '<span dir="ltr">' + p2 + '</span>' : '') + '</div>'
+    if (p3) {
+      h += '<div style="font:600 23px Arial;line-height:1.6"><span dir="ltr">' + p3 + '</span></div>'
+    }
+  } else if (p2 || p3) {
     h += '<div style="font:600 23px Arial;line-height:1.6">' +
       (p2 ? '<span dir="ltr">' + p2 + '</span>' : '') +
       (p2 && p3 ? '&nbsp;&nbsp;&nbsp;&nbsp;' : '') +

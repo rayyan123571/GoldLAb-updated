@@ -86,6 +86,27 @@ const FALLBACK_RATES = {
 
 const hasApi = typeof window !== 'undefined' && window.api
 
+// The settings fields a saved parchi legitimately owns: the rate context its
+// purity rows recompute from, plus the date it was written on. EVERYTHING else in
+// `rates` (shop header, printer/overlay setup — including a ~200 KB base64
+// overlay_bg_path image, theme, folders) belongs to the app as it is configured
+// TODAY, not to a parchi saved months ago.
+//
+// Used on both sides of the parchi payload: saveParchi stores only these, and
+// loadReceipt replays only these. Filtering on load matters just as much as on
+// save — receipts already in the database carry the whole old settings row, and
+// spreading that back over the live settings on every ◀/▶ press was both slow
+// (200 KB per navigation) and wrong (it reinstated stale printer settings).
+const RATE_CONTEXT_KEYS = [
+  'date', 'rate_tezabi_tola', 'rate_tezabi_gram', 'parchi_charges', 'fc_per_gram', 'point'
+]
+const rateContextOf = (r) => {
+  const out = {}
+  if (!r || typeof r !== 'object') return out
+  for (const k of RATE_CONTEXT_KEYS) if (r[k] !== undefined) out[k] = r[k]
+  return out
+}
+
 // Transient bottom-center toast for print failures — surfaces the reason instead
 // of failing silently (a failed print used to look like "nothing happened").
 function showPrintError(reason) {
@@ -282,9 +303,29 @@ function buildRasterSlipHtml(panelEl, rates) {
 // (Save button → saveParchi → replaceReceipt, and loadReceipt reconstruction).
 const DEBUG_SAVE = false
 
+// واٹس ایپ یاد دہانی default template — the renderer's copy of WA_REMINDER_DEFAULT in
+// electron/shopDefaults.cjs (which seeds settings.whatsapp_reminder_text). The stored
+// value always wins; this is only the fallback for a DB that predates the column and
+// the text the "اصل پیغام بحال کریں" button restores. Keep the two in step.
+export const WA_REMINDER_DEFAULT = 'محترم، آپ کے ذمے {رقم} باقی ہیں۔ برائے مہربانی ادائیگی کر دیں۔ شکریہ'
+
 export function AppProvider({ children }) {
   const [screen, setScreen] = useState('main') // 'main' | 'daybook' | 'udhar'
   const [rates, setRates] = useState(FALLBACK_RATES)
+  // Where did the date currently in rates.date come from? `true` = it was INHERITED
+  // from a saved parchi that was opened for viewing (loadReceipt replays that
+  // parchi's stored rates, and its date rides along), `false` = it is the real
+  // working date — today's, or a date the shopkeeper typed himself.
+  //
+  // This exists because ONE field was doing two jobs. rates.date is both "the date
+  // printed on the parchi on screen" and "the date every new entry is filed under".
+  // Browsing to an old parchi to check something therefore silently re-dated every
+  // ادھار / کھرچہ recorded afterwards — a whole morning's work could land on the
+  // previous day. Now viewing an old parchi still shows ITS date (so the printed
+  // slip stays truthful) while new entries use entryDate below, which ignores an
+  // inherited date. A date the user TYPES is never overridden — back-dating an
+  // entry on purpose keeps working.
+  const [dateFromParchi, setDateFromParchi] = useState(false)
   const [receiptNo, setReceiptNo] = useState(1)
   // The receipt_no of the SAVED parchi currently open on screen (null while
   // composing a new, unsaved parchi). Drives First/Last/Next/Prev navigation.
@@ -356,6 +397,7 @@ export function AppProvider({ children }) {
   const draftReadyRef = useRef(false)      // startup restore finished → auto-save may run
   const draftSeqRef = useRef(null)         // synchronous mirror of currentDraftSeq
   const draftsCacheRef = useRef([])        // [{ seq, data }] parsed, ascending by seq
+  const draftsLoadedRef = useRef(false)    // the cache has been read from the DB at least once
   const draftTimerRef = useRef(null)       // auto-save debounce handle
   const formSnapshotRef = useRef(null)     // { hasData, snap } latest composing form
   const persistInflightRef = useRef(Promise.resolve()) // serialize draft writes
@@ -363,7 +405,28 @@ export function AppProvider({ children }) {
   const reportsExportRef = useRef(null)    // latest scheduleReportsExport (called from commit points)
   const reportsBusyRef = useRef(false)     // an export is mid-flight → never stack another
 
-  const refresh = useCallback(() => setBump((b) => b + 1), [])
+  // Saved receipt numbers, cached for the navigation timeline. ◀ ▶ ⏮ ⏭ each build
+  // the timeline, and the arrow-enable effect builds it again right after — three
+  // identical listReceiptNos round-trips per single step. The list can only change
+  // through a DB write, and EVERY write path ends in refresh(), so clearing the
+  // cache there keeps it exact while making repeat reads free.
+  const savedNosRef = useRef(null)         // Promise<number[]> | null
+
+  const refresh = useCallback(() => {
+    savedNosRef.current = null
+    setBump((b) => b + 1)
+  }, [])
+
+  const listSavedNos = useCallback(async () => {
+    if (!hasApi || !window.api.listReceiptNos) return []
+    if (!savedNosRef.current) savedNosRef.current = window.api.listReceiptNos()
+    try {
+      return (await savedNosRef.current) || []
+    } catch {
+      savedNosRef.current = null // a failed read must never stick in the cache
+      return []
+    }
+  }, [])
 
   // ── Auto report-PDF export to the synced (Google Drive) folder ──────────────
   // After a transaction, regenerate ONE report per main-screen ACTION BUTTON into
@@ -518,6 +581,18 @@ export function AppProvider({ children }) {
           else loadDraftBySeq(newest.seq)
         }
       } catch { /* any failure → start clean */ }
+      // The restore above may have put an OLD date on screen: loadReceipt replays
+      // the opened parchi's saved `rates`, and `date` rides along inside them, so
+      // opening on yesterday's last parchi silently rewound the whole app's
+      // working date. That date is what EVERY save is stamped with (parchi rows,
+      // ادھار, اخراجات — see saveParchi/saveUdharTxn), so a fresh morning's work
+      // was being filed under the previous day and the روزنامچہ for آج looked
+      // empty. Startup must always land on TODAY, whatever the restored parchi
+      // says — this runs last so it wins over line 498's set AND the restore.
+      // (Browsing to an old parchi with ◀ ▶ still shows that parchi's own date,
+      // so printing an old slip keeps its original date.)
+      setRates((r) => ({ ...r, date: todayISO() }))
+      setDateFromParchi(false)
       draftReadyRef.current = true // startup restore done — auto-save may now run
     })()
   }, [])
@@ -567,6 +642,15 @@ export function AppProvider({ children }) {
   // current settings date (display-only; the DB cash balance/ledger is never
   // reduced by expenses).
   const cashDisplay = (Number(totals.cash) || 0) - expensesUpToDate
+
+  // The date a NEW standalone entry (ادھار action button, کھرچہ) is filed under.
+  // Same as the تاریخ field in every normal case — but when that field only holds
+  // a date INHERITED from an old parchi opened for viewing, today wins. Without
+  // this, glancing at a two-week-old parchi silently filed the next ادھار entry
+  // two weeks back, where no report for today would ever show it.
+  // saveParchi deliberately does NOT use this: editing a saved parchi must keep
+  // that parchi's own date, and a new parchi already starts on today.
+  const entryDate = dateFromParchi ? todayISO() : (rates.date || todayISO())
 
   // PART 1: the sidebar "پرچوں لیا" checkbox DRIVES "اجرت کا سونا" — ticking پرچوں لیا
   // ticks اجرت کا سونا, unticking unticks it. اجرت کا سونا being on is what the
@@ -647,6 +731,9 @@ export function AppProvider({ children }) {
   // ---- actions ----
   const saveRates = useCallback(async (patch) => {
     const next = { ...rates, ...patch }
+    // A date coming through here was CHOSEN (the تاریخ field, DefaultsForm), so it
+    // becomes the real working date — deliberate back-dating is honoured.
+    if (patch && Object.prototype.hasOwnProperty.call(patch, 'date')) setDateFromParchi(false)
     setRates(next)
     if (hasApi) await window.api.saveRates(next)
   }, [rates])
@@ -984,7 +1071,19 @@ export function AppProvider({ children }) {
       catch { /* skip a corrupt row */ }
     }
     draftsCacheRef.current = parsed
-    setDraftSeqs(parsed.map((p) => p.seq))
+    draftsLoadedRef.current = true
+    // Keep the SAME array when the seqs are unchanged. This is not a micro-
+    // optimisation — it closes a feedback loop that had the app querying the
+    // database ~83 times a second while sitting completely idle: the nav-arrow
+    // effect lists `draftSeqs` in its dependencies and (through buildTimeline)
+    // called this function, and a fresh array every time meant the dependency
+    // "changed" on every pass, so the effect immediately re-ran itself, forever.
+    // React bails out of the update when the value is identical.
+    setDraftSeqs((prev) => {
+      const next = parsed.map((p) => p.seq)
+      const same = prev.length === next.length && prev.every((v, i) => v === next[i])
+      return same ? prev : next
+    })
   }, [])
 
   // The number a brand-new unsaved parchi should get: the lowest positive integer
@@ -1079,10 +1178,24 @@ export function AppProvider({ children }) {
       if (!hasApi) return
       const fs = formSnapshotRef.current
       if (!fs) return
-      if (force || fs.hasData || draftSeqRef.current != null) {
-        const res = await window.api.upsertDraft(draftSeqRef.current, fs.snap)
-        if (res && res.seq != null) setDraftSeq(res.seq)
+      if (!(force || fs.hasData || draftSeqRef.current != null)) return
+      const seq = draftSeqRef.current
+      const json = JSON.stringify(fs.snap)
+      // NO-OP GUARD. Merely LOOKING at parked parchis (◀ ▶ ⏮ ⏭) parks each one
+      // again on the way out, and every such write makes the main process
+      // re-serialise and rewrite the ENTIRE database file — the single biggest
+      // cause of the lag between pressing an arrow and the parchi changing. When
+      // the form is byte-identical to the row already stored, there is nothing to
+      // write: skip the DB call (and the cache re-read) completely. Typing still
+      // parks normally, because then the snapshot differs. `cached.data` was
+      // parsed from a string this same JSON.stringify produced, so the comparison
+      // is exact.
+      if (seq != null) {
+        const cached = draftsCacheRef.current.find((p) => p.seq === seq)
+        if (cached && JSON.stringify(cached.data) === json) return
       }
+      const res = await window.api.upsertDraft(seq, json)
+      if (res && res.seq != null) setDraftSeq(res.seq)
       await refreshDraftsCache()
     }
     const p = persistInflightRef.current.then(run, run)
@@ -1143,6 +1256,7 @@ export function AppProvider({ children }) {
     setDraftSeq(null)
     setSavedFlags(NO_SAVED)
     setRates((r) => ({ ...r, date: todayISO() }))
+    setDateFromParchi(false)
     setOpenReceiptNo(null)
     const nn = await computeNextParchiNo()
     setReceiptNo(nn)
@@ -1164,9 +1278,15 @@ export function AppProvider({ children }) {
   // by seq; the blank workbench is one PAST the end of this array, never an
   // entry in it. A saved/draft tie at the SAME number (a reused number) keeps
   // saved first — both are visited, never skipped, never looped.
+  // SPEED: both reads are served from memory on a plain step. The drafts table is
+  // written ONLY through this store, and every one of those writes ends with
+  // refreshDraftsCache(), so draftsCacheRef is already the current truth — it is
+  // re-read here only if it has never been loaded. listSavedNos is cached until the
+  // next refresh(). Together these turned each ◀/▶ press from six DB round-trips
+  // (listDrafts ×3 + listReceiptNos ×2 + the parchi itself) into one.
   const buildTimeline = useCallback(async () => {
-    const savedNos = (hasApi && window.api.listReceiptNos) ? (await window.api.listReceiptNos()) : []
-    await refreshDraftsCache()
+    const savedNos = await listSavedNos()
+    if (!draftsLoadedRef.current) await refreshDraftsCache()
     const entries = savedNos.map((no) => ({ kind: 'saved', no: Number(no), seq: null }))
     for (const d of draftsCacheRef.current) {
       // EVERY stored draft is an entry — INCLUDING parked EMPTY parchis. An
@@ -1184,7 +1304,7 @@ export function AppProvider({ children }) {
       return (a.seq ?? 0) - (b.seq ?? 0)
     })
     return entries
-  }, [refreshDraftsCache])
+  }, [listSavedNos, refreshDraftsCache])
 
   // This app's CURRENT position in `timeline` — the index of the open saved
   // receipt or stored draft, or `timeline.length` (one PAST the end) for the
@@ -1250,7 +1370,15 @@ export function AppProvider({ children }) {
 
     // Restore the rate context the parchi was saved under, so the purity rows
     // recompute to EXACTLY the values that were saved (khalis/qeemat depend on it).
-    if (payload.rates) setRates((r) => ({ ...r, ...payload.rates }))
+    // The date rides along (the slip must print the parchi's OWN date), so flag it
+    // as inherited — entryDate then keeps new ادھار/کھرچہ entries on today.
+    // Only the rate context is replayed (see RATE_CONTEXT_KEYS) — never the printer
+    // / shop / overlay settings an older payload also happens to contain.
+    if (payload.rates) {
+      const ctx = rateContextOf(payload.rates)
+      setRates((r) => ({ ...r, ...ctx }))
+      if (ctx.date) setDateFromParchi(true)
+    }
 
     // Purity-table line-items (Local/Copper/Standard/Silver/Pure Silver) are fully
     // determined by the top weights + per-row overrides + rates. Restore them.
@@ -1599,12 +1727,20 @@ export function AppProvider({ children }) {
     // FULL snapshot payload so reopening restores every entry (purity line-items
     // via input+overrides+rates, plus the نقد/ادھار entries) — symmetric with
     // loadReceipt, which reads exactly these fields back.
+    //
+    // `rates` is stored as the RATE CONTEXT ONLY (rateContextOf) — not the whole
+    // settings row. The settings row also carries the printing setup, including
+    // overlay_bg_path, which is a ~200 KB base64 image: copying it into every
+    // receipt made each saved parchi ~205 KB, so simply opening one had to read,
+    // ship and parse a 200 KB image on every ◀/▶ press. It also meant reopening an
+    // old parchi replayed that parchi's printer/shop settings over the CURRENT
+    // ones. The rate context is what the purity rows actually recompute from.
     const payload = {
       receipt_no: rno,
       customer: { id: custId, name: (cust && cust.name) || '', mobile: (cust && cust.mobile) || '' },
       input: { wazan: input.wazan, malawat: input.malawat },
       overrides,
-      rates,
+      rates: rateContextOf(rates),
       entries: { cashSell, cashBuy, udharGive, udharTake, udharCashGive, udharCashTake },
       sidebar: { ujratKaSona, parchunLiya, sonaDiya, cashDiya },
       comment: udharComment
@@ -1694,7 +1830,9 @@ export function AppProvider({ children }) {
     }
     if (!cust || !cust.id) return { ok: false, message: 'پہلے کسٹمر کا نام منتخب کریں / درج کریں' }
     const rno = receiptNo
-    if (hasApi) await window.api.addTransaction({ receipt_no: rno, customer_id: cust.id, date: rates.date, ...t })
+    // entryDate, NOT rates.date: an ادھار entry made while an OLD parchi happens to
+    // be open on screen still belongs to today (see entryDate above).
+    if (hasApi) await window.api.addTransaction({ receipt_no: rno, customer_id: cust.id, date: entryDate, ...t })
     setSavedFlags((f) => ({ ...f, udhar: true }))
     refresh()
     try { reportsExportRef.current && reportsExportRef.current() } catch {}
@@ -1718,7 +1856,7 @@ export function AppProvider({ children }) {
       setReceiptNo((r) => r + 1)
     }
     return { ok: true, receipt_no: rno, customer: cust }
-  }, [ensureCustomer, receiptNo, rates.date, refresh, computeNextParchiNo, refreshDraftsCache])
+  }, [ensureCustomer, receiptNo, entryDate, refresh, computeNextParchiNo, refreshDraftsCache])
 
   // Stage 6 — open a fresh, blank parchi at the next receipt number. ALWAYS opens
   // immediately (no confirm/prompt). Crucially it does NOT discard the parchi you
@@ -1741,6 +1879,27 @@ export function AppProvider({ children }) {
     // blankWorkbench() itself sets draftSeq(null), so this fresh blank starts
     // fully detached from whatever row the parchi we just left ended up with.
   }, [openReceiptNo, flushDraft, blankWorkbench])
+
+  // ── Main-screen action registry — what Ctrl+S / Ctrl+N run ──────────────────
+  // The New/Save BUTTONS live in CustomerEntry, and their click handlers do more
+  // than call newParchi()/saveParchi(): they also own the little Urdu result
+  // toast. So the component registers those EXACT handlers here, and the global
+  // hotkey (src/logic/hotkeys.js) fires them — shortcut and button are literally
+  // one code path, never two that can drift. Nothing registered (CustomerEntry
+  // unmounted, i.e. off the main screen) → the trigger is a silent no-op.
+  const mainActionsRef = useRef({})
+  const registerMainActions = useCallback((actions) => {
+    mainActionsRef.current = actions || {}
+    return () => { mainActionsRef.current = {} }
+  }, [])
+  const triggerSaveParchi = useCallback(() => {
+    const fn = mainActionsRef.current.save
+    if (fn) fn()
+  }, [])
+  const triggerNewParchi = useCallback(() => {
+    const fn = mainActionsRef.current.new
+    if (fn) fn()
+  }, [])
 
   // Stage 1 — one-time fresh start: clear all transactions/receipts, numbering → 1.
   const resetData = useCallback(async () => {
@@ -1886,7 +2045,9 @@ export function AppProvider({ children }) {
     const t = { kind: 'udhar', direction, category, note: note || 'قسط/واپسی', meta: { settle: true } }
     if (kind === 'gold') { t.sona_wazan = amt; t.point = 100; t.khalis_sona = amt } else t.cash_amount = amt
     const rno = receiptNo
-    if (hasApi) await window.api.settleTransaction({ receipt_no: rno, customer_id: c.id, date: rates.date, ...t })
+    // entryDate (not rates.date) — a قسط/واپسی recorded today is today's, even if an
+    // old parchi is on screen.
+    if (hasApi) await window.api.settleTransaction({ receipt_no: rno, customer_id: c.id, date: entryDate, ...t })
     refresh()
     try { reportsExportRef.current && reportsExportRef.current() } catch {}
     // Draft-aware advance (parked drafts occupy their numbers; see saveUdharTxn).
@@ -1905,7 +2066,7 @@ export function AppProvider({ children }) {
       setReceiptNo((r) => r + 1)
     }
     return { ok: true, receipt_no: rno }
-  }, [receiptNo, rates.date, refresh, computeNextParchiNo, refreshDraftsCache])
+  }, [receiptNo, entryDate, refresh, computeNextParchiNo, refreshDraftsCache])
 
   const value = {
     screen, setScreen,
@@ -1936,7 +2097,10 @@ export function AppProvider({ children }) {
     hasNextReceipt: receiptBounds.hasNext,
     gotoFirstReceipt, gotoLastReceipt, gotoNextReceipt, gotoPrevReceipt,
     addTransaction,
-    saveParchi, saveUdharTxn, newParchi, resetData, resetKachaData, resetKachaCounter, getReport, getReportGroup1, getKachaReport, getAdjustmentsReport,
+    saveParchi, saveUdharTxn, newParchi,
+    // Ctrl+S / Ctrl+N plumbing — CustomerEntry registers, hotkeys.js triggers.
+    registerMainActions, triggerSaveParchi, triggerNewParchi,
+    resetData, resetKachaData, resetKachaCounter, getReport, getReportGroup1, getKachaReport, getAdjustmentsReport,
     editTransaction, removeTransaction, recordSettle,
     savedFlags, setSavedFlags,
     udharOpen, openUdhar, closeUdhar,
@@ -1944,6 +2108,7 @@ export function AppProvider({ children }) {
     hisabOpen, openHisab, closeHisab,
     printSlips,
     shareSlipWhatsApp,
+    entryDate, // date a NEW standalone entry belongs to (see above) — کھرچہ uses it
     hasApi
   }
 

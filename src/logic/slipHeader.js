@@ -20,6 +20,7 @@ export const SHOP_FIELDS = [
   'shop_name',
   'shop_tagline',
   'shop_owner',
+  'shop_owner2',
   'shop_phone1',
   'shop_phone2',
   'shop_phone3',
@@ -50,6 +51,7 @@ export function buildSlipHeader(shop) {
   const name = val(s.shop_name)
   const tagline = val(s.shop_tagline)
   const owner = val(s.shop_owner)
+  const owner2 = val(s.shop_owner2)
   const p1 = val(s.shop_phone1)
   const p2 = val(s.shop_phone2)
   const p3 = val(s.shop_phone3)
@@ -87,7 +89,20 @@ export function buildSlipHeader(shop) {
       (p1 ? phone(p1) : '') +
       '</div>'
   }
-  if (p2 || p3) {
+  // A SECOND owner, when filled in, takes phone2 up onto its own line — the same
+  // owner+phone pairing as the line above — and phone3 drops to a line of its own.
+  // With shop_owner2 blank this branch is skipped entirely and the original
+  // phone2+phone3 line below is emitted unchanged.
+  if (owner2) {
+    html += '<div style="font-size:13.5px;font-weight:600;line-height:1.8">' +
+      esc(owner2) +
+      (p2 ? '&nbsp;&nbsp;' : '') +
+      (p2 ? phone(p2) : '') +
+      '</div>'
+    if (p3) {
+      html += '<div style="font-size:14px;font-weight:600;line-height:1.7">' + phone(p3) + '</div>'
+    }
+  } else if (p2 || p3) {
     html += '<div style="font-size:14px;font-weight:600;line-height:1.7">' +
       (p2 ? phone(p2) : '') +
       (p2 && p3 ? '&nbsp;&nbsp;&nbsp;' : '') +

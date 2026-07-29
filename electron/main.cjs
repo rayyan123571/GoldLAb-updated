@@ -4,6 +4,7 @@ const fs = require('fs')
 const { spawn } = require('child_process')
 const db = require('./db.cjs')
 const backup = require('./backup.cjs')
+const manualBackup = require('./manualBackup.cjs') // manual "بیک اپ" button — separate from the automatic backup above
 const raster = require('./rasterPrint.cjs')
 const liveGold = require('./liveGold.cjs')
 const reportPdf = require('./reportPdf.cjs')
@@ -426,6 +427,26 @@ ipcMain.handle('pick-folder', async () => {
   }
 })
 
+// ── Manual backup (electron/manualBackup.cjs) ────────────────────────────────
+// The bottom-bar بیک اپ button: one click copies a dated snapshot of the DB into
+// a folder the shopkeeper picked. Entirely separate from the automatic backup —
+// its own config file, own folder, own filenames; nothing here reads or writes
+// backup-config.json. Never throws into the renderer: always resolves an object.
+ipcMain.handle('manual-backup-status', async () => {
+  try { return manualBackup.getStatus() }
+  catch (e) { return { ok: false, reason: String(e && e.message ? e.message : e) } }
+})
+
+ipcMain.handle('manual-backup-pick-folder', async () => {
+  try { return await manualBackup.pickFolder(win) }
+  catch (e) { return { ok: false, reason: 'error', detail: String(e && e.message ? e.message : e) } }
+})
+
+ipcMain.handle('manual-backup-run', async () => {
+  try { return manualBackup.run() }
+  catch (e) { return { ok: false, reason: 'copy-failed', detail: String(e && e.message ? e.message : e) } }
+})
+
 // Capture a screen region of the app window and place it on the system
 // clipboard as an IMAGE — used by the WhatsApp share: the renderer shows the
 // slip (same header/receipt/footer as printing), we snapshot it here, and the
@@ -488,6 +509,10 @@ async function startApp(userDataDir, dbPath) {
   // Silent automatic backups: shortly after launch, then every ~10 minutes, and
   // once more on quit below. Best-effort only — cannot crash or block the app.
   backup.start({ userDataDir, dbPath, flush: db.flush })
+  // Manual "بیک اپ" button (electron/manualBackup.cjs). This only records the
+  // paths — no timers, no schedule; it runs solely when the shopkeeper clicks.
+  // Same db.flush as the automatic backup, so a click always copies fresh data.
+  manualBackup.init({ userDataDir, dbPath, flush: db.flush })
   createWindow()
 
   app.on('activate', () => {
@@ -495,7 +520,32 @@ async function startApp(userDataDir, dbPath) {
   })
 }
 
+// ── Single instance ─────────────────────────────────────────────────────────
+// Only ONE copy of the app may run. Double-clicking the icon again (e.g. after
+// minimising) must NOT open a second window — that produced two windows the
+// shopkeeper confused for two separate sessions. The first copy holds the lock;
+// any later launch fails the lock, quits immediately, and its attempt fires
+// 'second-instance' in the running copy, which restores + focuses the one window.
+const gotSingleInstanceLock = app.requestSingleInstanceLock()
+if (!gotSingleInstanceLock) {
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    // Surface whatever window is up — the main window, or the trial gate before it.
+    const existing = win || BrowserWindow.getAllWindows()[0]
+    if (!existing) return
+    try {
+      if (existing.isMinimized()) existing.restore()
+      existing.setFullScreen(true) // this app runs frameless full-screen
+      existing.show()
+      existing.focus()
+    } catch {}
+  })
+}
+
 app.whenReady().then(async () => {
+  // A second copy that lost the lock is already quitting — do no startup work.
+  if (!gotSingleInstanceLock) return
   const userDataDir = app.getPath('userData')
   const dbPath = path.join(userDataDir, 'goldlab.sqlite')
   // Unlocked personal build: skip ALL trial + licence gating and launch directly.

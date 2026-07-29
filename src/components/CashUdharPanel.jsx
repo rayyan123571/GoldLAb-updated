@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { useApp } from '../state/store.jsx'
 import { fmtMoney, fmtNum, GRAMS_PER_TOLA, GRAMS_PER_RATTI, round } from '../logic/units.js'
+import { HK } from '../logic/hotkeys.js'
 
 // qeemat (PKR) from pure-gold grams using the per-tola rate.
 const qeemat = (khalisGrams, rateTola) =>
@@ -29,7 +30,9 @@ const hasData = (st) => String(st.wazan).trim() !== '' && Number(st.wazan) > 0
 // `disabled` locks/greys all three inputs (used for نقد mutual exclusion).
 // `onCommit` (ادھار rows only) fires on BLUR with the row's current state — i.e.
 // when a value is actually committed, not on every keystroke.
-function GoldRow({ label, st, set, rateTola, disabled = false, onCommit }) {
+// `hotkey` tags the سونا وزن box for the global shortcuts (src/logic/hotkeys.js):
+// Alt+R lands on نقد فروخت, Alt+U on تیزابی دیا, and Down/Up walk the group.
+function GoldRow({ label, st, set, rateTola, disabled = false, onCommit, hotkey }) {
   // Enter-to-advance focus flow (per-row ref, so wazan → this row's own rate):
   // wazan → (Enter) → rate → (Enter) → blur. point is skipped in the flow —
   // Enter inside point just blurs. Purely focus movement; no data changes.
@@ -52,7 +55,7 @@ function GoldRow({ label, st, set, rateTola, disabled = false, onCommit }) {
       <div className="cell justify-end pr-1 urdu text-[15px] font-bold text-right leading-tight bg-white">
         {label}
       </div>
-      <input dir="ltr" className={`inp-g text-center text-[15px] font-bold${lock}`} value={st.wazan} disabled={disabled}
+      <input dir="ltr" data-hotkey={hotkey} className={`inp-g text-center text-[15px] font-bold${lock}`} value={st.wazan} disabled={disabled}
         onChange={(e) => set({ ...st, wazan: e.target.value })} onKeyDown={onEnterFocusRate}
         onBlur={() => { if (onCommit) onCommit(hasData(st)) }} placeholder="-" />
       <input dir="ltr" className={`inp text-center text-[15px] font-bold${lock}`} value={st.point} disabled={disabled}
@@ -68,7 +71,7 @@ function GoldRow({ label, st, set, rateTola, disabled = false, onCommit }) {
 // One cash line: label (right) + ONE merged blank white cell across the four
 // middle columns + a single green amount box in the far-left قیمت column.
 // `onCommit` — same contract as GoldRow's (blur, ادھار rows only).
-function CashRow({ label, st, set, onCommit }) {
+function CashRow({ label, st, set, onCommit, hotkey }) {
   return (
     <div className="grid flex-1 min-h-0" style={gridStyle}>
       <div className="cell justify-end pr-1 urdu text-[15px] font-bold text-right leading-tight bg-white">
@@ -76,7 +79,7 @@ function CashRow({ label, st, set, onCommit }) {
       </div>
       {/* merged empty cell spanning سونا وزن + پوائنٹ + خالص سونا + ریٹ */}
       <div className="cell bg-white" style={{ gridColumn: 'span 4' }}>&nbsp;</div>
-      <input dir="ltr" className="inp-g text-center text-[15px] font-bold" value={st}
+      <input dir="ltr" data-hotkey={hotkey} className="inp-g text-center text-[15px] font-bold" value={st}
         onChange={(e) => set(e.target.value)}
         onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); e.currentTarget.blur() } }}
         onBlur={() => { if (onCommit) onCommit(Number(st) > 0) }}
@@ -112,7 +115,14 @@ export default function CashUdharPanel() {
 
   useEffect(() => {
     if (hasApi && customer.id) {
-      window.api.getCustomerLedger(customer.id).then(setLedger)
+      // Balances only — the two yellow boxes below use nothing else. getCustomerBalance
+      // sums them in SQLite; getCustomerLedger (the fallback for an older preload)
+      // returns the customer's entire transaction history to compute the same two
+      // numbers, which is pure IPC weight on every parchi navigation.
+      const read = window.api.getCustomerBalance
+        ? window.api.getCustomerBalance(customer.id)
+        : window.api.getCustomerLedger(customer.id)
+      read.then((l) => setLedger(l || { balance_gold: 0, balance_cash: 0 }))
     } else {
       setLedger({ balance_gold: 0, balance_cash: 0 })
     }
@@ -146,17 +156,17 @@ export default function CashUdharPanel() {
       {/* نقد (Cash) */}
       <div className="flex flex-col border border-line bg-white overflow-hidden flex-[3]">
         <Header title="نقد" />
-        <GoldRow label="فروخت" st={cashSell} set={setCashSell} rateTola={rateTola} disabled={hasData(cashBuy)} />
-        <GoldRow label="نقد خریدا" st={cashBuy} set={setCashBuy} rateTola={rateTola} disabled={hasData(cashSell)} />
+        <GoldRow label="فروخت" st={cashSell} set={setCashSell} rateTola={rateTola} disabled={hasData(cashBuy)} hotkey={HK.NAQD_SELL} />
+        <GoldRow label="نقد خریدا" st={cashBuy} set={setCashBuy} rateTola={rateTola} disabled={hasData(cashSell)} hotkey={HK.NAQD_BUY} />
       </div>
 
       {/* ادھار (Credit) */}
       <div className="flex flex-col border border-line bg-white overflow-hidden flex-[6]">
         <Header title="ادھار" />
-        <GoldRow label="تیزابی دیا" st={udharGive} set={setUdharGive} rateTola={rateTola} onCommit={onUdharCommit} />
-        <GoldRow label="تیزابی لیا" st={udharTake} set={setUdharTake} rateTola={rateTola} onCommit={onUdharCommit} />
-        <CashRow label="ادھار کیش دیا" st={udharCashGive} set={setUdharCashGive} onCommit={onUdharCommit} />
-        <CashRow label="ادھار کیش لیا" st={udharCashTake} set={setUdharCashTake} onCommit={onUdharCommit} />
+        <GoldRow label="تیزابی دیا" st={udharGive} set={setUdharGive} rateTola={rateTola} onCommit={onUdharCommit} hotkey={HK.UDHAR_GIVE} />
+        <GoldRow label="تیزابی لیا" st={udharTake} set={setUdharTake} rateTola={rateTola} onCommit={onUdharCommit} hotkey={HK.UDHAR_TAKE} />
+        <CashRow label="ادھار کیش دیا" st={udharCashGive} set={setUdharCashGive} onCommit={onUdharCommit} hotkey={HK.UDHAR_CASH_GIVE} />
+        <CashRow label="ادھار کیش لیا" st={udharCashTake} set={setUdharCashTake} onCommit={onUdharCommit} hotkey={HK.UDHAR_CASH_TAKE} />
 
         {/* Bottom band: ٹوٹل | empty | سونا لین دین | yellow | کیش لین دین | yellow */}
         <div className="grid flex-1 min-h-0" style={gridStyle}>

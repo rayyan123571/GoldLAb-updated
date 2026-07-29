@@ -1,8 +1,22 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { useApp } from '../state/store.jsx'
 import useLiveGold from '../logic/useLiveGold.js'
 import DefaultsForm from './DefaultsForm.jsx'
 import IndrajForm from './IndrajForm.jsx'
+import SodaBell from './SodaBell.jsx'
+
+const DAY_MS = 24 * 60 * 60 * 1000
+const BACKUP_STALE_DAYS = 7 // older than this → the "! بیک اپ کریں" nudge appears
+
+// Urdu message for each failure reason electron/manualBackup.cjs can return. A
+// backup must NEVER fail silently, so every path here ends in a visible message.
+const BACKUP_ERROR = {
+  'no-folder': 'بیک اپ فولڈر منتخب نہیں کیا گیا',
+  'not-writable': 'بیک اپ فولڈر نہیں ملا یا اس میں لکھا نہیں جا سکتا',
+  'no-db': 'ڈیٹا بیس فائل نہیں ملی',
+  'busy': 'بیک اپ پہلے سے جاری ہے',
+  'copy-failed': 'بیک اپ محفوظ نہیں ہو سکا — جگہ یا اجازت چیک کریں'
+}
 
 // Live gold spot box (display-only reference — no rates/receipts involvement).
 // MT5 Market-Watch style: bid (bold, larger) / ask (smaller, muted) side by
@@ -54,6 +68,61 @@ export default function StatusBar() {
   const [searchMsg, setSearchMsg] = useState('')
   const [showDefaults, setShowDefaults] = useState(false)
   const [showIndraj, setShowIndraj] = useState(false) // اندراج (manual balance adjust) modal
+  const [backupBusy, setBackupBusy] = useState(false)
+  const [backupMsg, setBackupMsg] = useState(null) // { text, ok } | null — self-dismissing
+  const [lastBackupAt, setLastBackupAt] = useState(null)
+  const backupTimer = useRef(null)
+
+  // Last manual-backup time — drives the overdue nudge beside the button. Read
+  // once on mount and refreshed after every successful backup.
+  useEffect(() => {
+    if (!window.api || !window.api.manualBackupStatus) return
+    window.api.manualBackupStatus()
+      .then((s) => { if (s && s.ok) setLastBackupAt(s.lastBackupAt || null) })
+      .catch(() => { /* status is advisory only — never block the bar */ })
+  }, [])
+
+  useEffect(() => () => { if (backupTimer.current) clearTimeout(backupTimer.current) }, [])
+
+  // Brief inline message in the bar itself — never a blocking dialog.
+  const flashBackup = (text, ok) => {
+    setBackupMsg({ text, ok })
+    if (backupTimer.current) clearTimeout(backupTimer.current)
+    backupTimer.current = setTimeout(() => setBackupMsg(null), 4000)
+  }
+
+  // One click = one dated snapshot copied into the chosen folder. With no folder
+  // chosen yet the picker opens first, then the backup continues in the same click.
+  const doBackup = async () => {
+    if (backupBusy) return
+    if (!window.api || !window.api.manualBackupRun) { flashBackup('بیک اپ اس موڈ میں دستیاب نہیں', false); return }
+    setBackupBusy(true)
+    try {
+      const status = await window.api.manualBackupStatus()
+      if (!status || !status.folder) {
+        const picked = await window.api.manualBackupPickFolder()
+        if (!picked || !picked.ok) {
+          flashBackup(BACKUP_ERROR[picked && picked.reason] || BACKUP_ERROR['no-folder'], false)
+          return
+        }
+      }
+      const res = await window.api.manualBackupRun()
+      if (res && res.ok) {
+        setLastBackupAt(res.lastBackupAt || null)
+        flashBackup(`ڈیٹا محفوظ ہو گیا — ${res.fileName}`, true)
+      } else {
+        flashBackup(BACKUP_ERROR[res && res.reason] || 'بیک اپ محفوظ نہیں ہو سکا', false)
+      }
+    } catch (e) {
+      console.warn('Manual backup failed:', e)
+      flashBackup('بیک اپ محفوظ نہیں ہو سکا', false)
+    } finally {
+      setBackupBusy(false)
+    }
+  }
+
+  // Overdue = never backed up at all, or more than a week since the last one.
+  const backupOverdue = !lastBackupAt || (Date.now() - new Date(lastBackupAt).getTime()) > BACKUP_STALE_DAYS * DAY_MS
 
   // Look up a parchi by its number, triggered by pressing Enter in the رسید نمبر
   // field. Delegates to the store's searchReceiptNo, which walks the merged
@@ -81,7 +150,45 @@ export default function StatusBar() {
     <div dir="rtl" className="flex items-stretch gap-1 px-1 py-1 bg-panel border-t border-line h-[40px]">
       {/* The live shop totals (کیش | کچا سونا | تیزابی) no longer live here —
           they moved, unchanged, into the top bar's ٹوٹل panel (TotalsPanel.jsx). */}
+
+      {/* بیک اپ — manual snapshot of the database into the chosen (Google Drive)
+          folder. FIRST DOM child on purpose: this bar is dir="rtl", so the first
+          child renders at the far RIGHT, and the flex-1 spacer below then pushes
+          everything else to the left. Moving this after the spacer would put it
+          on the wrong end of the bar. */}
+      <div className="self-center flex items-center gap-1.5 flex-shrink-0">
+        <button
+          type="button"
+          onClick={doBackup}
+          disabled={backupBusy}
+          title="ڈیٹا کا بیک اپ منتخب فولڈر میں محفوظ کریں"
+          className="self-center flex items-center gap-1.5 px-4 h-[26px] rounded-md bg-purple-600 text-white text-[12px] font-bold urdu shadow-sm hover:bg-purple-700 active:bg-purple-800 disabled:opacity-60 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-purple-400 transition-colors"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M20 16.6A5 5 0 0 0 18 7h-1.26A8 8 0 1 0 4 15.25" />
+            <path d="M12 12v9" />
+            <path d="m16 16-4-4-4 4" />
+          </svg>
+          {backupBusy ? 'محفوظ ہو رہا ہے…' : 'بیک اپ'}
+        </button>
+        {backupMsg ? (
+          <span className={`urdu text-[10px] whitespace-nowrap ${backupMsg.ok ? 'text-emerald-700' : 'text-red-600'}`}>
+            {backupMsg.text}
+          </span>
+        ) : backupOverdue ? (
+          <span className="urdu text-[10px] text-red-600 whitespace-nowrap" title="سات دن سے بیک اپ نہیں ہوا">
+            ! بیک اپ کریں
+          </span>
+        ) : null}
+      </div>
+
       <div className="flex-1" />
+
+      {/* بقایا سودا notifications — FIRST item of the left cluster (right AFTER the
+          flex-1 spacer). In this dir="rtl" bar that lands it at the RIGHT edge of
+          the رسید نکالیں cluster, in the open space beside رسید نمبر — not cramped
+          between the buttons. Opens ONLY on click; the red badge hides at zero. */}
+      <SodaBell />
 
       {/* receipt search on the LEFT (replaces the old 1..U buttons) */}
       <div className="flex items-center gap-1.5">
